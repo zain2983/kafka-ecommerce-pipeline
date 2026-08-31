@@ -31,11 +31,20 @@ Usage:
     # Keep re-checking every 2s - handy for watching a rebalance happen
     # live while you start/stop consumer instances in other terminals
     python tests/kafka/inspect_consumer_group.py --watch 2
+
+With --watch, each partition's lag row also shows a trend arrow versus
+the previous refresh (^ growing = falling behind, v shrinking = catching
+up, = unchanged) - this is what makes it useful for watching a failure
+happen live (design.md section 25, Phase 7): stop postgres, watch lag
+climb with '^' on every refresh while the ingestion consumer retries and
+gives up, restart postgres and the consumer, and watch it flip to 'v'
+until it's back to 0.
 """
 
 import argparse
 import sys
 import time
+from typing import Optional
 
 from confluent_kafka import TopicPartition
 from confluent_kafka.admin import AdminClient
@@ -59,7 +68,27 @@ def parse_args():
     return p.parse_args()
 
 
-def inspect_once(admin: AdminClient, group: str, topic: str, bootstrap_servers: str):
+def _trend_arrow(lag: int, prev: Optional[int]) -> str:
+    """Single-character trend indicator: lag growing/shrinking/unchanged
+    versus prev (the same partition's lag on the previous refresh, or
+    None on the first call of a run, when there is nothing to compare)."""
+    if prev is None:
+        return " "
+    if lag > prev:
+        return "^"
+    if lag < prev:
+        return "v"
+    return "="
+
+
+def inspect_once(
+    admin: AdminClient, group: str, topic: str, bootstrap_servers: str, previous_lag: dict
+):
+    """
+    previous_lag: dict of {partition: last-seen lag}, mutated in place so
+    the caller's --watch loop can pass the same dict back in on the next
+    iteration to get trend arrows. Pass {} for a one-shot call.
+    """
     # --- 1. Membership + assignment ---
     describe_futures = admin.describe_consumer_groups([group], request_timeout=10)
     try:
@@ -120,9 +149,10 @@ def inspect_once(admin: AdminClient, group: str, topic: str, bootstrap_servers: 
         }
     )
 
-    print(f"\n{'Partition':>9}  {'Committed':>9}  {'High Watermark':>15}  {'Lag':>6}")
-    print("-" * 48)
+    print(f"\n{'Partition':>9}  {'Committed':>9}  {'High Watermark':>15}  {'Lag':>6}  Trend")
+    print("-" * 55)
     total_lag = 0
+    new_lag_by_partition = {}
     for p in all_partitions:
         _, high = probe.get_watermark_offsets(TopicPartition(topic, p), timeout=10, cached=False)
         raw_committed = committed_by_partition.get(p)
@@ -131,11 +161,16 @@ def inspect_once(admin: AdminClient, group: str, topic: str, bootstrap_servers: 
         committed_offset = raw_committed if raw_committed is not None and raw_committed >= 0 else 0
         lag = max(high - committed_offset, 0)
         total_lag += lag
+        new_lag_by_partition[p] = lag
+        trend = _trend_arrow(lag, previous_lag.get(p))
         committed_display = committed_offset if raw_committed is not None and raw_committed >= 0 else "(none)"
-        print(f"{p:>9}  {committed_display!s:>9}  {high:>15}  {lag:>6}")
+        print(f"{p:>9}  {committed_display!s:>9}  {high:>15}  {lag:>6}  {trend:^5}")
 
     probe.close()
     print(f"\nTotal lag across all partitions: {total_lag}")
+
+    previous_lag.clear()
+    previous_lag.update(new_lag_by_partition)
 
 
 def main():
@@ -144,13 +179,14 @@ def main():
     admin = AdminClient({"bootstrap.servers": args.bootstrap_servers})
 
     if args.watch is None:
-        inspect_once(admin, args.group, args.topic, args.bootstrap_servers)
+        inspect_once(admin, args.group, args.topic, args.bootstrap_servers, {})
         return
 
+    previous_lag = {}  # carried across iterations so trend arrows work
     try:
         while True:
             print("\033c", end="")  # clear terminal between refreshes
-            inspect_once(admin, args.group, args.topic, args.bootstrap_servers)
+            inspect_once(admin, args.group, args.topic, args.bootstrap_servers, previous_lag)
             print(f"\n(refreshing every {args.watch}s, Ctrl+C to stop)")
             time.sleep(args.watch)
     except KeyboardInterrupt:

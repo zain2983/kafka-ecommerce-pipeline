@@ -13,8 +13,10 @@ tests/
 │   │                              also useful for the DLQ/retry topics added in later phases)
 │   └── inspect_consumer_group.py inspects a consumer group: member assignment + per-partition lag
 ├── ingestion/
-│   ├── test_validator.py         tests normalize_event()/validate_event() in isolation, no Kafka
-│   └── test_end_to_end.py        full pipeline: produce -> real consumer subprocess -> verify Postgres
+│   ├── test_validator.py                    tests normalize_event()/validate_event() in isolation, no Kafka
+│   ├── test_end_to_end.py                   full pipeline: produce -> real consumer subprocess -> verify Postgres
+│   ├── test_failure_recovery_postgres.py    kills postgres mid-stream, restarts it, confirms recovery
+│   └── test_failure_recovery_crash.py       SIGKILLs the consumer mid-stream, restarts it, confirms recovery
 └── postgres/
     ├── test_database.py          tests EventDatabase's idempotent insert directly, no Kafka
     └── inspect_raw_events.py     inspects what's actually in raw.events
@@ -263,6 +265,69 @@ drain any other backlog sitting in the topic before it can confirm
 lag=0 - if you've been generating a lot of traffic, the first run after
 that may take longer (default timeout: 30s).
 
+## 8. `test_failure_recovery_postgres.py` - Postgres outage recovery (Phase 7)
+
+Proves design.md sections 10/13/25's "transient PostgreSQL outage" flow
+actually holds, not just that the retry-loop code reads correctly:
+
+1. Produces one known test event.
+2. Stops the `ecommerce-postgres` container, THEN starts the ingestion
+   consumer - every DB write attempt is guaranteed to fail.
+3. Confirms the consumer retries, gives up on its own (doesn't hang),
+   and never commits the offset (lag stays >= 1).
+4. Restarts postgres, starts a fresh consumer, confirms it re-reads the
+   same message (nothing was lost) and writes it exactly once
+   (idempotency held even across a full process restart).
+
+```bash
+docker compose up -d
+python3 tests/ingestion/test_failure_recovery_postgres.py
+```
+
+Stops/restarts the shared `ecommerce-postgres` container - don't run
+this while relying on postgres for something else. It always leaves
+postgres running when it finishes, even if an assertion fails partway
+through.
+
+Along the way, this test is also what caught a real gap: `main.py`'s
+`EventDatabase(...)` used to connect eagerly at startup with no retry,
+so if postgres was already down when the consumer *started* (as opposed
+to going down while it was already running), the process died with a
+raw, unhandled traceback instead of the same "retry, then give up
+loudly" behavior every other outage gets. `_connect_with_retry()` in
+`main.py` fixes that - and closes the Kafka consumer before exiting on
+total failure, so a `docker exec` shell watching group membership never
+sees a "phantom" member sitting there for a stale session timeout.
+
+## 9. `test_failure_recovery_crash.py` - process crash recovery (Phase 7)
+
+Same idea, different failure mode: instead of the *dependency* going
+down, the ingestion process itself dies abruptly (SIGKILL - no signal
+handler runs, nothing gets a chance to flush pending offsets).
+
+1. Produces 150 known test events.
+2. Starts the real consumer, lets it run for ~8s (long enough to join
+   the group and process a good chunk of the batch), then SIGKILLs it.
+3. Confirms whatever landed in Postgres before the kill has no
+   duplicates (every write is its own transaction).
+4. Starts a fresh consumer. Kafka only learns the old member is gone
+   once its session times out (~45s by default - a real crash gives
+   Kafka no chance to be told sooner, which is exactly the scenario
+   this is testing), then rebalances the abandoned partitions onto the
+   new instance, which may re-process some already-written events.
+5. Confirms all 150 events end up present, and exactly 150 rows exist -
+   proving the re-processing overlap from step 4 never created a
+   duplicate.
+
+```bash
+docker compose up -d
+python3 tests/ingestion/test_failure_recovery_crash.py
+```
+
+Takes roughly a minute, mostly spent waiting out that session timeout -
+that wait is Kafka correctly doing its job, not something to work
+around.
+
 ## Generating some real traffic to inspect
 
 ```bash
@@ -270,3 +335,13 @@ cd producer
 EVENTS_PER_SECOND=20 python3 -m app.main
 # Ctrl+C to stop - it flushes and prints final sent/delivered/failed counts
 ```
+
+## Consumer env vars added in Phase 7
+
+- `KAFKA_CONSUMER_INSTANCE_ID` - readable label for a consumer process's
+  logs (maps to Kafka's `client.id`), useful when running multiple
+  instances at once (see section 3 above).
+- `COMMIT_BATCH_SIZE` (default `20`) / `COMMIT_INTERVAL_SECONDS`
+  (default `2.0`) - batched offset commits (design.md section 10.1):
+  the consumer commits once per this many confirmed messages or this
+  many seconds, whichever comes first, instead of once per message.

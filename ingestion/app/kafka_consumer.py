@@ -9,7 +9,7 @@ import socket
 import uuid
 from dataclasses import dataclass, field
 
-from confluent_kafka import Consumer
+from confluent_kafka import Consumer, TopicPartition
 
 logger = logging.getLogger(__name__)
 
@@ -93,14 +93,38 @@ class EventConsumer:
 
     def commit(self, msg):
         """
-        Synchronously commit the offset for this message. Blocking
-        (asynchronous=False) is the simplest thing to reason about for a
-        learning project - it means "commit" really does mean "durably
+        Synchronously commit the offset for a single message. Blocking
+        (asynchronous=False) means "commit" really does mean "durably
         recorded before we move on" every single time, at the cost of one
-        network round-trip per message. Phase 6/7 can revisit batching
-        commits for throughput once the basic correctness is solid.
+        network round-trip per call.
         """
         self._consumer.commit(message=msg, asynchronous=False)
+
+    def commit_offsets(self, offsets_by_partition: dict):
+        """
+        Synchronously commit multiple partitions' offsets in a single
+        network round-trip (design.md section 10.1 - batched commits).
+
+        offsets_by_partition maps partition -> next offset to read on
+        resume (i.e. the offset of the last successfully-handled message
+        in that partition, PLUS ONE - by Kafka convention a committed
+        offset always means "resume here", not "this was last consumed").
+        Callers build this by tracking msg.offset() + 1 for every message
+        that has already been safely written to Postgres (or deliberately
+        skipped as unparseable/invalid) since the last commit - never for
+        one that's still pending or failed. That's what keeps this an
+        optimization on top of the correctness model in section 10, not
+        a replacement for it: the offset committed still never advances
+        past a message whose outcome isn't confirmed, it's just done for
+        several messages at once instead of one at a time.
+        """
+        if not offsets_by_partition:
+            return
+        offsets = [
+            TopicPartition(self.topic, partition, offset)
+            for partition, offset in offsets_by_partition.items()
+        ]
+        self._consumer.commit(offsets=offsets, asynchronous=False)
 
     @staticmethod
     def deserialize(msg) -> dict:
