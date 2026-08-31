@@ -63,7 +63,8 @@ def main():
     db = EventDatabase(db_config)
 
     logger.info(
-        "Consuming from topic=%s group=%s at bootstrap=%s -> writing to postgres db=%s@%s:%s",
+        "[%s] Consuming from topic=%s group=%s at bootstrap=%s -> writing to postgres db=%s@%s:%s",
+        consumer.instance_id,
         kafka_config.topic,
         kafka_config.group_id,
         kafka_config.bootstrap_servers,
@@ -186,7 +187,8 @@ def main():
 
         if consumed % 50 == 0:
             logger.info(
-                "stats: consumed=%d inserted=%d duplicate=%d invalid=%d",
+                "[%s] stats: consumed=%d inserted=%d duplicate=%d invalid=%d",
+                consumer.instance_id,
                 consumed,
                 inserted_count,
                 duplicate_count,
@@ -194,7 +196,8 @@ def main():
             )
 
     logger.info(
-        "Final stats: consumed=%d inserted=%d duplicate=%d invalid=%d",
+        "[%s] Final stats: consumed=%d inserted=%d duplicate=%d invalid=%d",
+        consumer.instance_id,
         consumed,
         inserted_count,
         duplicate_count,

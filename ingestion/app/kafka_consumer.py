@@ -5,6 +5,8 @@ Wraps confluent-kafka's Consumer for the ingestion service.
 import json
 import logging
 import os
+import socket
+import uuid
 from dataclasses import dataclass, field
 
 from confluent_kafka import Consumer
@@ -23,15 +25,28 @@ class KafkaConsumerConfig:
     )
     topic: str = field(default_factory=lambda: _str("KAFKA_TOPIC", "ecommerce-events"))
     group_id: str = field(default_factory=lambda: _str("KAFKA_CONSUMER_GROUP", "ingestion-service"))
+    # A human-readable label for THIS process, distinct from Kafka's
+    # internal member id (a broker-generated UUID we never see directly).
+    # Its only purpose is to make multi-consumer logs/PS output readable
+    # when running several instances of this same group_id side by side
+    # (design.md section 26 - consumer groups, partition rebalancing) -
+    # it plays no part in how Kafka assigns partitions or tracks offsets.
+    instance_id: str = field(
+        default_factory=lambda: _str(
+            "KAFKA_CONSUMER_INSTANCE_ID", f"{socket.gethostname()}-{uuid.uuid4().hex[:6]}"
+        )
+    )
 
 
 class EventConsumer:
     def __init__(self, config: KafkaConsumerConfig):
         self.topic = config.topic
+        self.instance_id = config.instance_id
         self._consumer = Consumer(
             {
                 "bootstrap.servers": config.bootstrap_servers,
                 "group.id": config.group_id,
+                "client.id": config.instance_id,
                 # Start from the earliest offset the first time this
                 # group_id has ever been seen. On every subsequent run,
                 # Kafka resumes from the group's last committed offset
@@ -50,7 +65,27 @@ class EventConsumer:
                 "enable.auto.commit": False,
             }
         )
-        self._consumer.subscribe([self.topic])
+        self._consumer.subscribe(
+            [self.topic],
+            on_assign=self._on_assign,
+            on_revoke=self._on_revoke,
+        )
+
+    def _on_assign(self, consumer, partitions):
+        """
+        Fired whenever the group coordinator (re)assigns partitions to
+        this process - on initial startup, and again any time group
+        membership changes (another instance joins/leaves/crashes) and
+        the group rebalances. Purely observational logging: this is what
+        makes partition ownership visible when running multiple
+        instances of the same group_id (design.md section 26).
+        """
+        assigned = sorted(p.partition for p in partitions)
+        logger.info("[%s] partitions ASSIGNED: %s", self.instance_id, assigned)
+
+    def _on_revoke(self, consumer, partitions):
+        revoked = sorted(p.partition for p in partitions)
+        logger.info("[%s] partitions REVOKED (rebalance starting): %s", self.instance_id, revoked)
 
     def poll(self, timeout: float = 1.0):
         """Return one raw Kafka Message, or None if nothing arrived within timeout."""

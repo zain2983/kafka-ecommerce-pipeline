@@ -9,8 +9,9 @@ tests/
 ├── producer/
 │   └── test_event_generator.py   tests producer/app code in isolation, no Kafka
 ├── kafka/
-│   └── inspect_kafka_topic.py    inspects any topic on the cluster (not producer-specific -
-│                                  also useful for the DLQ/retry topics added in later phases)
+│   ├── inspect_kafka_topic.py    inspects any topic on the cluster (not producer-specific -
+│   │                              also useful for the DLQ/retry topics added in later phases)
+│   └── inspect_consumer_group.py inspects a consumer group: member assignment + per-partition lag
 ├── ingestion/
 │   ├── test_validator.py         tests normalize_event()/validate_event() in isolation, no Kafka
 │   └── test_end_to_end.py        full pipeline: produce -> real consumer subprocess -> verify Postgres
@@ -122,7 +123,84 @@ Notes:
   cluster, partition leadership would be spread across brokers - that's
   part of how Kafka distributes load and survives a broker failing.
 
-## 3. `test_validator.py` - test normalization/validation alone
+## 3. `inspect_consumer_group.py` - see partition assignment + lag
+
+Also requires the `.venv` to be active. Read-only (AdminClient calls only)
+- never joins the group or consumes anything, so running it has zero
+effect on the real consumer's assignment or committed offsets.
+
+Prints who currently belongs to the `ingestion-service` consumer group,
+which partitions each member owns, and each partition's lag (committed
+offset vs. high watermark - i.e. its unprocessed backlog).
+
+```bash
+python3 tests/kafka/inspect_consumer_group.py
+```
+
+```
+Group: ingestion-service
+State: ConsumerGroupState.STABLE
+Partition assignor: range
+
+2 member(s):
+
+  client.id=consumer-A  host=/192.168.65.1
+    owns partitions: [0, 1]
+  client.id=consumer-B  host=/192.168.65.1
+    owns partitions: [2]
+
+Partition  Committed   High Watermark     Lag
+------------------------------------------------
+        0        774              774       0
+        1        750              750       0
+        2        831              831       0
+
+Total lag across all partitions: 0
+```
+
+Add `--watch 2` to refresh every 2 seconds - useful for watching a
+rebalance happen live while you start/stop consumer instances in other
+terminals.
+
+### Demonstrating partitions + consumer groups (design.md section 26)
+
+`ecommerce-events` has 3 partitions, and the ingestion consumer's
+`group.id` defaults to `ingestion-service` (`KAFKA_CONSUMER_GROUP`).
+Running more than one `app.main` process with the *same* group.id joins
+them into the same group, and Kafka splits the partitions between them
+- that's what a consumer group is for: horizontal scaling within a
+topic, with Kafka guaranteeing no two members ever read the same
+partition at the same time.
+
+```bash
+cd ingestion
+
+# Terminal 1
+KAFKA_CONSUMER_INSTANCE_ID=consumer-A python3 -m app.main
+
+# Terminal 2 (same group.id - the default - so it joins consumer-A's group)
+KAFKA_CONSUMER_INSTANCE_ID=consumer-B python3 -m app.main
+```
+
+`KAFKA_CONSUMER_INSTANCE_ID` is just a readable label for logs (it maps
+to Kafka's `client.id`, not the group's internal member id) - it makes
+it possible to tell which instance's log lines are which when running
+several side by side. Watch either terminal's logs for lines like:
+
+```
+partitions REVOKED (rebalance starting): [0, 1, 2]
+partitions ASSIGNED: [0, 1]
+```
+
+Then run `inspect_consumer_group.py` (above) in a third terminal to see
+the same assignment from the broker's point of view. Ctrl+C one of the
+two consumers and watch the other one log a REVOKED/ASSIGNED pair as it
+picks up the abandoned partition(s) - that's the same rebalance
+mechanism Kafka uses for failure recovery (Phase 7): from the group's
+perspective, "a consumer crashed" and "a consumer was stopped on
+purpose" look identical.
+
+## 4. `test_validator.py` - test normalization/validation alone
 
 Feeds hand-written cases (clean, messy-but-fixable, and genuinely broken)
 through the real `ingestion/app/validator.py` code. No Kafka, no Postgres.
@@ -131,7 +209,7 @@ through the real `ingestion/app/validator.py` code. No Kafka, no Postgres.
 python3 tests/ingestion/test_validator.py
 ```
 
-## 4. `test_database.py` - test idempotent inserts alone
+## 5. `test_database.py` - test idempotent inserts alone
 
 Talks to `ingestion/app/database.py` directly, with no Kafka involved.
 Confirms a fresh insert creates a row, inserting the same `event_id`
@@ -150,7 +228,7 @@ python3 tests/postgres/test_database.py
 Test rows use event_ids prefixed `evt_test_db_...` and are cleaned up
 automatically at the start of each run, so re-running is always safe.
 
-## 5. `inspect_raw_events.py` - see what's actually in Postgres
+## 6. `inspect_raw_events.py` - see what's actually in Postgres
 
 The Postgres-side counterpart to `inspect_kafka_topic.py`. Prints row
 count vs. distinct `event_id` count (these should always be equal - a
@@ -163,7 +241,7 @@ python3 tests/postgres/inspect_raw_events.py --limit 20
 python3 tests/postgres/inspect_raw_events.py --user-id user_42
 ```
 
-## 6. `test_end_to_end.py` - the full pipeline, automated
+## 7. `test_end_to_end.py` - the full pipeline, automated
 
 This is the automated version of what we did by hand while building
 Phase 5: produce a small set of known events straight to Kafka (one
