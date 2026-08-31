@@ -30,5 +30,30 @@ services:
     volumes:
       - kafka_data:/var/lib/kafka/data
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: ecommerce-postgres
+
+    ports:
+      - "5432:5432"
+
+    environment:
+      POSTGRES_DB: ecommerce
+      POSTGRES_USER: ecommerce
+      POSTGRES_PASSWORD: ecommerce
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Scripts here run once, in filename order, only when the data
+      # directory is first initialized - not on every restart.
+      - ./postgres/init:/docker-entrypoint-initdb.d
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ecommerce -d ecommerce"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
 volumes:
   kafka_data:
+  postgres_data:

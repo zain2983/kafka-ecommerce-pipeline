@@ -380,6 +380,12 @@ Kafka now believes the message was processed even though the database never rece
 
 The project should therefore demonstrate an **at-least-once processing model**.
 
+## 10.1 Future Enhancement: Batched Commits
+
+The basic version commits the offset synchronously after every single message. This is correct and easy to reason about, but limits throughput to one Kafka round-trip per event.
+
+Once the basic (per-message) version is working end-to-end, this can be revisited for throughput: buffer N events (or flush every K seconds), write them to PostgreSQL together, and commit the Kafka offset once per batch rather than once per message - as long as the offset committed never advances past a message whose write hasn't been confirmed. This is an optimization on top of the correctness model above, not a replacement for it, and should only be tackled after the unbatched version is proven correct under failure (Phase 7).
+
 ---
 
 # 11. Idempotency
@@ -1050,6 +1056,7 @@ The project should eventually demonstrate the following.
 * Retry logic
 * Dead-letter queues
 * Failure recovery
+* Batched offset commits for throughput (see 10.1)
 
 ## PostgreSQL
 

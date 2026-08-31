@@ -37,15 +37,17 @@ class EventConsumer:
                 # Kafka resumes from the group's last committed offset
                 # instead - this setting only matters for a brand-new group.
                 "auto.offset.reset": "earliest",
-                # Phase 4 keeps this simple: the client library commits
-                # offsets periodically in the background, independent of
-                # whether we actually finished processing each message.
-                # design.md section 10 is explicit that offsets should only
-                # be committed AFTER a successful database write - we can't
-                # honor that yet because there's no database in this phase.
-                # Phase 7 (Offsets + Failure Recovery) replaces this with
-                # manual, post-write commits.
-                "enable.auto.commit": True,
+                # Manual commits: design.md section 10 requires the offset
+                # to be committed only AFTER the corresponding write to
+                # PostgreSQL succeeds. If we let the client auto-commit on
+                # a timer instead, a message could be marked "done" before
+                # its database write actually happened - and if the
+                # process then crashed, that event would be silently lost
+                # forever (Kafka would never redeliver it, since Kafka
+                # already believes it was processed). main.py calls
+                # commit() explicitly, once per message, right after the
+                # database confirms the write.
+                "enable.auto.commit": False,
             }
         )
         self._consumer.subscribe([self.topic])
@@ -53,6 +55,17 @@ class EventConsumer:
     def poll(self, timeout: float = 1.0):
         """Return one raw Kafka Message, or None if nothing arrived within timeout."""
         return self._consumer.poll(timeout)
+
+    def commit(self, msg):
+        """
+        Synchronously commit the offset for this message. Blocking
+        (asynchronous=False) is the simplest thing to reason about for a
+        learning project - it means "commit" really does mean "durably
+        recorded before we move on" every single time, at the cost of one
+        network round-trip per message. Phase 6/7 can revisit batching
+        commits for throughput once the basic correctness is solid.
+        """
+        self._consumer.commit(message=msg, asynchronous=False)
 
     @staticmethod
     def deserialize(msg) -> dict:

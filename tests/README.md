@@ -8,9 +8,15 @@ happening.
 tests/
 ├── producer/
 │   └── test_event_generator.py   tests producer/app code in isolation, no Kafka
-└── kafka/
-    └── inspect_kafka_topic.py    inspects any topic on the cluster (not producer-specific -
-                                   also useful for the DLQ/retry topics added in later phases)
+├── kafka/
+│   └── inspect_kafka_topic.py    inspects any topic on the cluster (not producer-specific -
+│                                  also useful for the DLQ/retry topics added in later phases)
+├── ingestion/
+│   ├── test_validator.py         tests normalize_event()/validate_event() in isolation, no Kafka
+│   └── test_end_to_end.py        full pipeline: produce -> real consumer subprocess -> verify Postgres
+└── postgres/
+    ├── test_database.py          tests EventDatabase's idempotent insert directly, no Kafka
+    └── inspect_raw_events.py     inspects what's actually in raw.events
 ```
 
 ## Setup (once)
@@ -115,6 +121,69 @@ Notes:
   there is only one broker in this local cluster. In a multi-broker
   cluster, partition leadership would be spread across brokers - that's
   part of how Kafka distributes load and survives a broker failing.
+
+## 3. `test_validator.py` - test normalization/validation alone
+
+Feeds hand-written cases (clean, messy-but-fixable, and genuinely broken)
+through the real `ingestion/app/validator.py` code. No Kafka, no Postgres.
+
+```bash
+python3 tests/ingestion/test_validator.py
+```
+
+## 4. `test_database.py` - test idempotent inserts alone
+
+Talks to `ingestion/app/database.py` directly, with no Kafka involved.
+Confirms a fresh insert creates a row, inserting the same `event_id`
+again is silently ignored rather than erroring or duplicating (design.md
+section 11), and that `reconnect()` leaves the connection usable
+afterward - the same reconnect path the ingestion consumer relies on
+after a Postgres outage.
+
+Requires Postgres running:
+
+```bash
+docker compose up -d postgres
+python3 tests/postgres/test_database.py
+```
+
+Test rows use event_ids prefixed `evt_test_db_...` and are cleaned up
+automatically at the start of each run, so re-running is always safe.
+
+## 5. `inspect_raw_events.py` - see what's actually in Postgres
+
+The Postgres-side counterpart to `inspect_kafka_topic.py`. Prints row
+count vs. distinct `event_id` count (these should always be equal - a
+mismatch would mean the idempotent insert is broken), a breakdown by
+`event_type`, and the most recent rows.
+
+```bash
+python3 tests/postgres/inspect_raw_events.py
+python3 tests/postgres/inspect_raw_events.py --limit 20
+python3 tests/postgres/inspect_raw_events.py --user-id user_42
+```
+
+## 6. `test_end_to_end.py` - the full pipeline, automated
+
+This is the automated version of what we did by hand while building
+Phase 5: produce a small set of known events straight to Kafka (one
+event sent twice on purpose, one deliberately invalid), launch the real
+`ingestion/app/main.py` as a subprocess, wait for its consumer group's
+lag to hit zero, stop it, and check Postgres for exactly what should be
+there - the valid events once each, the duplicate not creating a second
+row, and the invalid event never inserted at all.
+
+Requires the full stack running:
+
+```bash
+docker compose up -d
+python3 tests/ingestion/test_end_to_end.py
+```
+
+It shares the real `ingestion-service` consumer group, so it will also
+drain any other backlog sitting in the topic before it can confirm
+lag=0 - if you've been generating a lot of traffic, the first run after
+that may take longer (default timeout: 30s).
 
 ## Generating some real traffic to inspect
 
