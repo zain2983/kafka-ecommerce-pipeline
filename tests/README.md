@@ -9,14 +9,17 @@ tests/
 ├── producer/
 │   └── test_event_generator.py   tests producer/app code in isolation, no Kafka
 ├── kafka/
-│   ├── inspect_kafka_topic.py    inspects any topic on the cluster (not producer-specific -
-│   │                              also useful for the DLQ/retry topics added in later phases)
-│   └── inspect_consumer_group.py inspects a consumer group: member assignment + per-partition lag
+│   ├── inspect_kafka_topic.py    inspects any topic on the cluster (also used for the DLQ/retry topics)
+│   ├── inspect_consumer_group.py inspects a consumer group: member assignment + per-partition lag
+│   └── replay_dlq.py             republishes DLQ records to the retry topic for another attempt
 ├── ingestion/
 │   ├── test_validator.py                    tests normalize_event()/validate_event() in isolation, no Kafka
+│   ├── test_dedup_cache.py                  tests DedupCache's LRU/TTL eviction in isolation, no Kafka
 │   ├── test_end_to_end.py                   full pipeline: produce -> real consumer subprocess -> verify Postgres
 │   ├── test_failure_recovery_postgres.py    kills postgres mid-stream, restarts it, confirms recovery
-│   └── test_failure_recovery_crash.py       SIGKILLs the consumer mid-stream, restarts it, confirms recovery
+│   ├── test_failure_recovery_crash.py       SIGKILLs the consumer mid-stream, restarts it, confirms recovery
+│   ├── test_dedup_stress.py                 hammers the pipeline with duplicates, confirms zero land as rows
+│   └── test_dlq_flow.py                     full DLQ pipeline: reject -> DLQ -> replay -> fix -> recovered
 └── postgres/
     ├── test_database.py          tests EventDatabase's idempotent insert directly, no Kafka
     └── inspect_raw_events.py     inspects what's actually in raw.events
@@ -34,6 +37,16 @@ Make sure Kafka is running for the second script:
 ```bash
 docker compose up -d
 docker ps --filter name=ecommerce-kafka
+```
+
+`kafka/init/create_topics.sh` isn't run automatically by docker-compose -
+run it once per fresh Kafka volume (creates `ecommerce-events` plus, as
+of Phase 9, `ecommerce-events-dlq` and `ecommerce-events-retry`; safe to
+re-run, it's idempotent):
+
+```bash
+docker cp kafka/init/create_topics.sh ecommerce-kafka:/tmp/create_topics.sh
+docker exec ecommerce-kafka bash /tmp/create_topics.sh
 ```
 
 ## 1. `test_event_generator.py` - test the generator alone
@@ -211,7 +224,19 @@ through the real `ingestion/app/validator.py` code. No Kafka, no Postgres.
 python3 tests/ingestion/test_validator.py
 ```
 
-## 5. `test_database.py` - test idempotent inserts alone
+## 5. `test_dedup_cache.py` - test the in-memory dedup cache alone (Phase 8)
+
+Feeds hand-written cases through `ingestion/app/dedup_cache.py` directly.
+No Kafka, no Postgres. Confirms basic add/contains, LRU eviction once
+`max_size` is exceeded, and TTL eviction once an entry ages out - the
+two ways this fast-path cache is allowed to "forget" an event_id, on
+purpose (see section 9 below for why that's safe).
+
+```bash
+python3 tests/ingestion/test_dedup_cache.py
+```
+
+## 6. `test_database.py` - test idempotent inserts alone
 
 Talks to `ingestion/app/database.py` directly, with no Kafka involved.
 Confirms a fresh insert creates a row, inserting the same `event_id`
@@ -230,7 +255,7 @@ python3 tests/postgres/test_database.py
 Test rows use event_ids prefixed `evt_test_db_...` and are cleaned up
 automatically at the start of each run, so re-running is always safe.
 
-## 6. `inspect_raw_events.py` - see what's actually in Postgres
+## 7. `inspect_raw_events.py` - see what's actually in Postgres
 
 The Postgres-side counterpart to `inspect_kafka_topic.py`. Prints row
 count vs. distinct `event_id` count (these should always be equal - a
@@ -243,7 +268,7 @@ python3 tests/postgres/inspect_raw_events.py --limit 20
 python3 tests/postgres/inspect_raw_events.py --user-id user_42
 ```
 
-## 7. `test_end_to_end.py` - the full pipeline, automated
+## 8. `test_end_to_end.py` - the full pipeline, automated
 
 This is the automated version of what we did by hand while building
 Phase 5: produce a small set of known events straight to Kafka (one
@@ -265,7 +290,7 @@ drain any other backlog sitting in the topic before it can confirm
 lag=0 - if you've been generating a lot of traffic, the first run after
 that may take longer (default timeout: 30s).
 
-## 8. `test_failure_recovery_postgres.py` - Postgres outage recovery (Phase 7)
+## 9. `test_failure_recovery_postgres.py` - Postgres outage recovery (Phase 7)
 
 Proves design.md sections 10/13/25's "transient PostgreSQL outage" flow
 actually holds, not just that the retry-loop code reads correctly:
@@ -299,7 +324,7 @@ loudly" behavior every other outage gets. `_connect_with_retry()` in
 total failure, so a `docker exec` shell watching group membership never
 sees a "phantom" member sitting there for a stale session timeout.
 
-## 9. `test_failure_recovery_crash.py` - process crash recovery (Phase 7)
+## 10. `test_failure_recovery_crash.py` - process crash recovery (Phase 7)
 
 Same idea, different failure mode: instead of the *dependency* going
 down, the ingestion process itself dies abruptly (SIGKILL - no signal
@@ -328,6 +353,79 @@ Takes roughly a minute, mostly spent waiting out that session timeout -
 that wait is Kafka correctly doing its job, not something to work
 around.
 
+## 11. `test_dedup_stress.py` - heavy duplicate injection (Phase 8)
+
+Goes well beyond `test_end_to_end.py`'s single deliberately-repeated
+event: sends 40 unique events x 5 copies each (200 messages total),
+shuffled so duplicates land scattered across the stream rather than
+back-to-back, against a consumer started with `DEDUP_CACHE_SIZE=5` -
+deliberately smaller than the 40 unique event_ids, so the in-memory
+dedup cache is forced to evict entries mid-run. That's the point: it
+proves that when the fast-path cache misses a duplicate (eviction), the
+Postgres `event_id` uniqueness constraint - the actual correctness
+guarantee, described in `ingestion/app/main.py`'s module docstring - is
+what stops it becoming a second row, not the cache. Confirms exactly 40
+rows land, no more, no less.
+
+```bash
+docker compose up -d
+python3 tests/ingestion/test_dedup_stress.py
+```
+
+## 12. `replay_dlq.py` - republish DLQ records for another attempt (Phase 9)
+
+Operational tool, not a test: reads whatever's currently on
+`ecommerce-events-dlq` and republishes it to `ecommerce-events-retry`,
+where `retry_main.py` (see below) picks it up for a real second attempt.
+Doesn't delete or mark anything in the DLQ - Kafka topics are logs, not
+dequeue-able queues - so re-running with the same filters replays the
+same records again; that's intentional, not a bug.
+
+```bash
+# See what's there without touching anything
+python3 tests/kafka/replay_dlq.py --dry-run
+
+# Replay everything
+python3 tests/kafka/replay_dlq.py
+
+# Replay one record by dlq_id (find one via inspect_kafka_topic.py --topic
+# ecommerce-events-dlq --show --from-beginning)
+python3 tests/kafka/replay_dlq.py --dlq-id <dlq_id>
+
+# Skip records that have already failed RETRY_MAX_ATTEMPTS times
+python3 tests/kafka/replay_dlq.py --skip-exhausted
+```
+
+To fix a genuinely bad event before replaying it, don't use this tool -
+publish a corrected record directly to `ecommerce-events-retry` instead
+(see `test_dlq_flow.py` below for exactly what that record needs to look
+like). This tool is for "try the exact same thing again," which is
+still useful on its own for a transient rejection, or just to move a
+record off the DLQ and into the retry consumer's metrics.
+
+## 13. `test_dlq_flow.py` - full DLQ pipeline, automated (Phase 9)
+
+The most end-to-end test in this repo. Sends one unparseable and one
+invalid (bad quantity) event through the real ingestion consumer, then:
+
+1. Confirms both are rejected (never land in `raw.events`) and both
+   appear on `ecommerce-events-dlq` with `retry_count=0` and the right
+   `reason`.
+2. Replays both, UNCHANGED, to `ecommerce-events-retry` and runs the
+   real retry consumer (`retry_main.py`). Confirms both fail again (the
+   bad data didn't change) and reappear on the DLQ with `retry_count=1` -
+   proving a failed retry re-enters the DLQ rather than vanishing or
+   blocking the retry topic.
+3. Publishes a THIRD record straight to `ecommerce-events-retry` with
+   the quantity corrected (simulating an operator fixing the data before
+   replaying) and runs the retry consumer again. Confirms the fixed
+   event lands in `raw.events` exactly once.
+
+```bash
+docker compose up -d
+python3 tests/ingestion/test_dlq_flow.py
+```
+
 ## Generating some real traffic to inspect
 
 ```bash
@@ -336,7 +434,7 @@ EVENTS_PER_SECOND=20 python3 -m app.main
 # Ctrl+C to stop - it flushes and prints final sent/delivered/failed counts
 ```
 
-## Consumer env vars added in Phase 7
+## Consumer env vars added in Phase 7 / Phase 8 / Phase 9
 
 - `KAFKA_CONSUMER_INSTANCE_ID` - readable label for a consumer process's
   logs (maps to Kafka's `client.id`), useful when running multiple
@@ -345,3 +443,24 @@ EVENTS_PER_SECOND=20 python3 -m app.main
   (default `2.0`) - batched offset commits (design.md section 10.1):
   the consumer commits once per this many confirmed messages or this
   many seconds, whichever comes first, instead of once per message.
+- `DEDUP_CACHE_SIZE` (default `10000`) / `DEDUP_CACHE_TTL_SECONDS`
+  (default `300.0`) - size and max age for the in-memory dedup cache
+  (Phase 8, `ingestion/app/dedup_cache.py`) that lets the consumer skip
+  a Postgres round-trip for an event_id it's already handled recently.
+  Lowering `DEDUP_CACHE_SIZE` is how section 11's stress test forces the
+  cache to evict and prove the Postgres constraint still catches what
+  the cache misses.
+- `KAFKA_DLQ_TOPIC` (default `ecommerce-events-dlq`) - where `main.py`
+  and `retry_main.py` publish rejected messages (Phase 9,
+  `ingestion/app/dlq.py`).
+- `KAFKA_RETRY_TOPIC` (default `ecommerce-events-retry`) /
+  `KAFKA_RETRY_CONSUMER_GROUP` (default `retry-service`) -
+  `retry_main.py`'s own topic/group, kept separate from `main.py`'s
+  `KAFKA_TOPIC`/`KAFKA_CONSUMER_GROUP` so both processes can run off the
+  same environment without colliding.
+- `RETRY_MAX_ATTEMPTS` (default `3`) - purely informational: once a
+  record's `retry_count` reaches this, `retry_main.py` logs at CRITICAL
+  instead of WARNING when bouncing it back to the DLQ, as a hint to stop
+  replaying it. There's no automatic retry loop for this to actually
+  cap - a message only re-enters the retry topic when an operator (or
+  `replay_dlq.py`) puts it there.

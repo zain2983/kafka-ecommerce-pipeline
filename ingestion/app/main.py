@@ -1,10 +1,8 @@
 """
 Entry point: consume events from Kafka, normalize, validate, write valid
-ones to PostgreSQL, and only then commit the Kafka offset.
-
-There is still no DLQ topic (Phase 9) - invalid events are logged and
-the offset is committed anyway (skipping forward, since without a DLQ
-there's nowhere else to put them right now).
+ones to PostgreSQL, and only then commit the Kafka offset. Unparseable
+or invalid events are routed to the DLQ (see the "Dead-letter queue"
+note below) rather than blocking anything after them.
 
 Offset-commit sequencing (design.md section 10):
     1. Consume message
@@ -22,11 +20,12 @@ and a fresh DB connection each attempt) and deliberately does NOT poll()
 again until it either succeeds or gives up. If it gives up, the process
 stops entirely rather than silently skipping forward - because skipping
 would mean that event (and the fact that this partition ever got stuck)
-disappears with no record of it. A real DLQ strategy for genuinely
-invalid messages is still Phase 9 - what this file now does handle
-(Phase 7) is the "PostgreSQL was temporarily unreachable" case: stop and
-make the failure loud, which is unglamorous but is still exactly Kafka's
-at-least-once model - nothing is lost, because nothing was committed.
+disappears with no record of it. This covers the "PostgreSQL was
+temporarily unreachable" case specifically (Phase 7) - a DIFFERENT
+failure class from a genuinely invalid message (Phase 9's DLQ, below):
+stop and make the failure loud, which is unglamorous but is still
+exactly Kafka's at-least-once model - nothing is lost, because nothing
+was committed.
 
 Batched offset commits (design.md section 10.1, Phase 7): rather than
 one commit() round-trip per message, this loop tracks each partition's
@@ -50,6 +49,29 @@ to succeed before there's a Kafka offset to protect in the first place -
 _connect_with_retry() applies the same retry-then-give-up-loudly policy
 to that case too, instead of letting an unhandled connection error kill
 the process with a bare traceback.
+
+Dead-letter queue (design.md section 12, Phase 9): unparseable and
+invalid messages used to just be logged and skipped ("would send to
+DLQ"). Now they actually are: dlq.py's DLQProducer publishes a record -
+reason, errors, the original raw payload, and where it came from - to
+ecommerce-events-dlq before this loop moves on. The main topic's offset
+is still committed either way, exactly as before: a permanently-invalid
+message must never be able to block everything after it, and now
+there's an actual durable record of what was rejected and why, instead
+of only a log line. See retry_main.py for how a DLQ'd message can later
+be replayed and re-attempted.
+
+Deduplication vs. idempotency (design.md section 26, Phase 8): Postgres'
+event_id PRIMARY KEY + ON CONFLICT DO NOTHING (database.py) is what
+guarantees a duplicate can never become a second row - that's the
+correctness backstop and it's unconditional. `dedup_cache` (see
+dedup_cache.py) sits in front of it as an optimization only: if an
+event_id was handled recently enough to still be in that in-memory
+cache, this loop skips the Postgres round-trip entirely instead of
+sending a write it already knows would be a no-op. The cache is allowed
+to miss real duplicates (it starts empty on every restart, and evicts
+old entries once full or aged out) precisely because the DB constraint
+is what actually has to be right, not the cache.
 """
 
 import logging
@@ -59,7 +81,10 @@ import sys
 import time
 
 from app.database import DatabaseConfig, EventDatabase
+from app.dedup_cache import DedupCache
+from app.dlq import DLQProducer, DLQProducerConfig
 from app.kafka_consumer import EventConsumer, KafkaConsumerConfig
+from app.pipeline import insert_with_retry
 from app.validator import normalize_event, validate_event
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -70,6 +95,9 @@ DB_RETRY_BACKOFF_SECONDS = 2
 
 COMMIT_BATCH_SIZE = int(os.environ.get("COMMIT_BATCH_SIZE", "20"))
 COMMIT_INTERVAL_SECONDS = float(os.environ.get("COMMIT_INTERVAL_SECONDS", "2.0"))
+
+DEDUP_CACHE_SIZE = int(os.environ.get("DEDUP_CACHE_SIZE", "10000"))
+DEDUP_CACHE_TTL_SECONDS = float(os.environ.get("DEDUP_CACHE_TTL_SECONDS", "300.0"))
 
 _shutdown = False
 
@@ -125,6 +153,8 @@ def main():
     db_config = DatabaseConfig()
 
     consumer = EventConsumer(kafka_config)
+    dedup_cache = DedupCache(max_size=DEDUP_CACHE_SIZE, ttl_seconds=DEDUP_CACHE_TTL_SECONDS)
+    dlq = DLQProducer(DLQProducerConfig())
     db = _connect_with_retry(db_config)
     if db is None:
         # Explicitly close so Kafka's group coordinator learns this
@@ -145,7 +175,8 @@ def main():
         db_config.port,
     )
 
-    consumed = inserted_count = duplicate_count = invalid_count = 0
+    consumed = inserted_count = invalid_count = 0
+    cache_duplicate_count = db_duplicate_count = 0
 
     # partition -> next offset to resume at, for every message whose
     # outcome is confirmed but not yet committed to Kafka. Flushed by
@@ -190,14 +221,27 @@ def main():
         consumed += 1
         partition, offset = msg.partition(), msg.offset()
 
+        raw_payload = msg.value().decode("utf-8", errors="replace") if msg.value() else ""
+        raw_key = msg.key().decode("utf-8", errors="replace") if msg.key() else None
+
         try:
             raw_event = consumer.deserialize(msg)
         except ValueError as e:
             invalid_count += 1
+            dlq_id = dlq.send(
+                reason="UNPARSEABLE",
+                errors=[str(e)],
+                original_topic=kafka_config.topic,
+                original_partition=partition,
+                original_offset=offset,
+                raw_payload=raw_payload,
+                key=raw_key,
+            )
             logger.warning(
-                "[partition %d offset %d] UNPARSEABLE (would send to DLQ): %s",
+                "[partition %d offset %d] UNPARSEABLE -> DLQ (dlq_id=%s): %s",
                 partition,
                 offset,
+                dlq_id,
                 e,
             )
             _mark_confirmed(partition, offset)
@@ -208,52 +252,48 @@ def main():
 
         if errors:
             invalid_count += 1
+            dlq_id = dlq.send(
+                reason="VALIDATION_FAILED",
+                errors=errors,
+                original_topic=kafka_config.topic,
+                original_partition=partition,
+                original_offset=offset,
+                raw_payload=raw_payload,
+                key=raw_key,
+            )
             logger.warning(
-                "[partition %d offset %d] INVALID event_id=%s (would send to DLQ): %s",
+                "[partition %d offset %d] INVALID event_id=%s -> DLQ (dlq_id=%s): %s",
                 partition,
                 offset,
                 event.get("event_id"),
+                dlq_id,
                 "; ".join(errors),
             )
             _mark_confirmed(partition, offset)
             continue
 
-        was_inserted = None
-        for attempt in range(1, DB_RETRY_ATTEMPTS + 1):
-            try:
-                was_inserted = db.insert_event(event, partition, offset)
-                break
-            except Exception as e:
-                logger.warning(
-                    "[partition %d offset %d] DB write attempt %d/%d failed for "
-                    "event_id=%s: %s",
-                    partition,
-                    offset,
-                    attempt,
-                    DB_RETRY_ATTEMPTS,
-                    event.get("event_id"),
-                    e,
-                )
-                if attempt < DB_RETRY_ATTEMPTS:
-                    time.sleep(DB_RETRY_BACKOFF_SECONDS)
-                    try:
-                        db.reconnect()
-                    except Exception as reconnect_error:
-                        # The DB may still be down - that's just another
-                        # failed attempt, not a reason to crash. If
-                        # reconnect() itself dies, self._conn is left as
-                        # whatever _connect() partially produced (or the
-                        # old closed one); either way the NEXT
-                        # insert_event() call will raise again and this
-                        # loop will retry reconnecting once more.
-                        logger.warning(
-                            "[partition %d offset %d] reconnect attempt %d/%d failed: %s",
-                            partition,
-                            offset,
-                            attempt,
-                            DB_RETRY_ATTEMPTS,
-                            reconnect_error,
-                        )
+        event_id = event["event_id"]
+        if dedup_cache.contains(event_id):
+            cache_duplicate_count += 1
+            logger.info(
+                "[partition %d offset %d] DUPLICATE (cache hit) event_id=%s - skipped "
+                "Postgres entirely",
+                partition,
+                offset,
+                event_id,
+            )
+            _mark_confirmed(partition, offset)
+            continue
+
+        was_inserted = insert_with_retry(
+            db,
+            event,
+            partition,
+            offset,
+            attempts=DB_RETRY_ATTEMPTS,
+            backoff_seconds=DB_RETRY_BACKOFF_SECONDS,
+            log_context=f"[partition {partition} offset {offset}]",
+        )
 
         if was_inserted is None:
             logger.critical(
@@ -274,6 +314,12 @@ def main():
             _flush_pending("giving up, flushing prior confirmed work")
             break  # stop consuming entirely - do NOT poll() past this message
 
+        # Mark this event_id as seen regardless of which branch fired -
+        # a DB-caught duplicate belongs in the cache too, so the NEXT
+        # redelivery of it (if any) hits the fast path instead of making
+        # Postgres tell us the same thing again.
+        dedup_cache.add(event_id)
+
         if was_inserted:
             inserted_count += 1
             logger.info(
@@ -284,23 +330,25 @@ def main():
                 event.get("user_id"),
             )
         else:
-            duplicate_count += 1
+            db_duplicate_count += 1
             logger.info(
-                "[partition %d offset %d] DUPLICATE event_id=%s ignored (already in raw.events)",
+                "[partition %d offset %d] DUPLICATE (DB caught) event_id=%s ignored "
+                "(already in raw.events - dedup cache missed this one)",
                 partition,
                 offset,
-                event["event_id"],
+                event_id,
             )
 
         _mark_confirmed(partition, offset)
 
         if consumed % 50 == 0:
             logger.info(
-                "[%s] stats: consumed=%d inserted=%d duplicate=%d invalid=%d",
+                "[%s] stats: consumed=%d inserted=%d cache_dup=%d db_dup=%d invalid=%d",
                 consumer.instance_id,
                 consumed,
                 inserted_count,
-                duplicate_count,
+                cache_duplicate_count,
+                db_duplicate_count,
                 invalid_count,
             )
 
@@ -312,13 +360,15 @@ def main():
     _flush_pending("shutting down")
 
     logger.info(
-        "[%s] Final stats: consumed=%d inserted=%d duplicate=%d invalid=%d",
+        "[%s] Final stats: consumed=%d inserted=%d cache_dup=%d db_dup=%d invalid=%d",
         consumer.instance_id,
         consumed,
         inserted_count,
-        duplicate_count,
+        cache_duplicate_count,
+        db_duplicate_count,
         invalid_count,
     )
+    dlq.close()
     db.close()
     consumer.close()
 
