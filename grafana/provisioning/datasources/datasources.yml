@@ -1,0 +1,35 @@
+# design.md section 19: Grafana needs two very different kinds of data -
+# business metrics live in Postgres (populated by dbt), streaming/system
+# metrics live in Kafka (surfaced via kafka-exporter -> Prometheus,
+# Phase 11). Both datasources are provisioned here instead of added by
+# hand in the UI, so a fresh `docker compose up` gets a working Grafana
+# with zero manual clicking.
+apiVersion: 1
+
+datasources:
+  - name: Postgres
+    uid: postgres-ds
+    type: postgres
+    access: proxy
+    url: postgres:5432
+    # Set in both places (top-level, which older Grafana versions read,
+    # and jsonData below, which newer ones prefer) so the database name
+    # is picked up either way.
+    database: ecommerce
+    user: ecommerce
+    isDefault: true
+    editable: true
+    jsonData:
+      database: ecommerce
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: false
+    secureJsonData:
+      password: ecommerce
+
+  - name: Prometheus
+    uid: prometheus-ds
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    editable: true

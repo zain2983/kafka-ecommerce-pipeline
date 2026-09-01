@@ -14,9 +14,18 @@ services:
 
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
 
-      # Listeners
-      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      # Listeners: two data listeners on purpose (Phase 11). PLAINTEXT is
+      # what the host-run producer/ingestion processes use, advertised as
+      # localhost:9092 since they connect from outside Docker. INTERNAL
+      # is for containers on the same docker-compose network (Grafana's
+      # Prometheus datasource has nothing to do with Kafka directly, but
+      # kafka-exporter does) - those resolve services by name, and
+      # "localhost" from inside a container means that container itself,
+      # not the kafka container, so they need their own listener
+      # advertised as kafka:29092. Same broker, same data, two addresses.
+      KAFKA_LISTENERS: PLAINTEXT://:9092,INTERNAL://:29092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,INTERNAL://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
 
       # Broker configuration
@@ -29,6 +38,18 @@ services:
 
     volumes:
       - kafka_data:/var/lib/kafka/data
+
+    # Phase 11: lets other services' `depends_on: kafka: condition:
+    # service_healthy` actually wait for the broker to be ready, not
+    # just for the container to have started - see kafka-exporter below,
+    # which used to crash on a fresh `docker compose up` because it
+    # tried to connect before Kafka was actually accepting connections.
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+      start_period: 15s
 
   postgres:
     image: postgres:16-alpine
@@ -54,6 +75,85 @@ services:
       timeout: 5s
       retries: 5
 
+  # Phase 11: exposes Kafka broker/topic/consumer-group state (partition
+  # offsets, consumer group lag) as Prometheus metrics. Talks to Kafka
+  # over the INTERNAL listener (kafka:29092) since it runs inside the
+  # docker-compose network, not on the host.
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:latest
+    container_name: ecommerce-kafka-exporter
+    command:
+      - "--kafka.server=kafka:29092"
+
+    ports:
+      - "9308:9308"
+
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+    # kafka_exporter treats "broker not accepting connections yet" as a
+    # FATAL error and exits instead of retrying (unlike this project's
+    # own Python services, which all retry-then-give-up loudly instead
+    # of just dying) - condition: service_healthy above should prevent
+    # that race, but this is a second line of defense: if it still
+    # crashes for any reason, restart it rather than leaving Prometheus
+    # scraping a dead target indefinitely.
+    restart: on-failure
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ecommerce-prometheus
+
+    ports:
+      - "9090:9090"
+
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+
+    depends_on:
+      - kafka-exporter
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: ecommerce-grafana
+
+    ports:
+      - "3000:3000"
+
+    environment:
+      # Local/portfolio project, not a shared instance - a fixed known
+      # login beats forcing a password change dialog on every fresh volume.
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+
+    volumes:
+      - grafana_data:/var/lib/grafana
+      # Provisioning: datasources + dashboards are defined as code here
+      # and auto-loaded on startup (design.md section 20 - reproducible
+      # via docker compose up, no manual clicking in the UI).
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+    depends_on:
+      # A plain `- postgres` here only waits for the CONTAINER to start,
+      # not for Postgres to actually be ready to accept connections -
+      # `condition: service_healthy` waits for postgres's healthcheck
+      # (pg_isready) to pass first. Without this, on a fresh
+      # `docker compose up`, Grafana can provision its Postgres
+      # datasource and run its own connection test before Postgres is
+      # actually accepting connections yet, leaving that datasource
+      # showing an error until something (a restart, a later health
+      # re-check) retries it - not a config mistake, a startup race.
+      postgres:
+        condition: service_healthy
+      prometheus:
+        condition: service_started
+
 volumes:
   kafka_data:
   postgres_data:
+  prometheus_data:
+  grafana_data:

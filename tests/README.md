@@ -23,8 +23,10 @@ tests/
 ├── postgres/
 │   ├── test_database.py          tests EventDatabase's idempotent insert directly, no Kafka
 │   └── inspect_raw_events.py     inspects what's actually in raw.events
-└── dbt/
-    └── test_daily_sales.py       inserts known rows, runs `dbt build`, verifies the aggregation is correct
+├── dbt/
+│   └── test_daily_sales.py       inserts known rows, runs `dbt build`, verifies the aggregation is correct
+└── grafana/
+    └── verify_stack.py           confirms Grafana/Prometheus/kafka-exporter are wired up correctly
 ```
 
 ## Setup (once)
@@ -487,7 +489,61 @@ docker compose up -d
 python3 tests/dbt/test_daily_sales.py
 ```
 
-## Generating some real traffic to inspect
+## 15. Grafana / Prometheus / kafka-exporter (Phase 11)
+
+`docker compose up -d` now also brings up three more services:
+
+```
+kafka-exporter   :9308   exposes Kafka broker/topic/consumer-group state as Prometheus metrics
+                          (talks to Kafka over its INTERNAL listener, kafka:29092 - see
+                          docker-compose.yml's kafka service for why there are two listeners)
+prometheus       :9090   scrapes kafka-exporter every 10s (prometheus/prometheus.yml)
+grafana          :3000   two datasources (Postgres for business metrics, Prometheus for
+                          streaming metrics) + one dashboard, all provisioned as code under
+                          grafana/provisioning/ and grafana/dashboards/ - nothing to click
+                          together by hand after `docker compose up -d`
+```
+
+Open http://localhost:3000 (login `admin` / `admin`) and look for the
+**E-Commerce Streaming Platform** dashboard. It has two rows:
+
+- **Business Metrics** (Postgres): Orders/Revenue/Units Sold today (from
+  `analytics.daily_sales`), Active Users and Conversion Rate in the last
+  hour and Event Type Breakdown in the last 24h (straight from
+  `raw.events`, since `customer_metrics`/`product_performance` are
+  deferred dbt models), and a Daily Sales Revenue trend.
+- **Streaming Metrics** (Prometheus): Events/sec on `ecommerce-events`,
+  Consumer Lag for both `ingestion-service` and `retry-service`, DLQ
+  message rate and total, and active `ingestion-service` group members.
+
+Panels refresh every 5s - run the producer/consumer (see below) and
+watch it move live instead of switching between terminals.
+
+Two startup-ordering races got fixed along the way, both the same
+shape: a service started as soon as its dependency's *container*
+started, not once that dependency was actually ready to accept
+connections. `kafka` and `postgres` both have a `healthcheck:` now, and
+`kafka-exporter`/`grafana` both `depends_on` theirs with
+`condition: service_healthy` - without that, a fresh `docker compose up`
+could leave `kafka-exporter` crashed (it treats "broker not ready yet"
+as fatal and exits, no retry) or Grafana's Postgres datasource stuck
+showing a connection error, in both cases requiring a manual restart to
+recover. `kafka-exporter` also gets `restart: on-failure` as a second
+line of defense.
+
+### `verify_stack.py` - confirm everything is actually wired up correctly
+
+The containers being "Up" doesn't mean the datasources connected, the
+dashboard loaded, or a single query in it actually resolves - this
+checks all of that directly (Grafana's API, Prometheus's API, and
+Postgres) rather than relying on eyeballing the dashboard in a browser.
+
+```bash
+docker compose up -d
+python3 tests/grafana/verify_stack.py
+```
+
+
 
 ```bash
 cd producer

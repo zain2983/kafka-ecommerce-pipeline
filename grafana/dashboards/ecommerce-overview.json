@@ -1,0 +1,242 @@
+{
+  "title": "E-Commerce Streaming Platform",
+  "uid": "ecommerce-overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "5s",
+  "time": { "from": "now-1h", "to": "now" },
+  "tags": ["ecommerce", "kafka", "dbt"],
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Business Metrics (Postgres / dbt)",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Orders Today",
+      "description": "analytics.daily_sales, today's row (design.md section 18).",
+      "gridPos": { "x": 0, "y": 1, "w": 6, "h": 4 },
+      "datasource": { "type": "postgres", "uid": "postgres-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "postgres-ds" },
+          "format": "table",
+          "rawSql": "SELECT orders FROM analytics.daily_sales WHERE sale_date = CURRENT_DATE",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Revenue Today",
+      "gridPos": { "x": 6, "y": 1, "w": 6, "h": 4 },
+      "datasource": { "type": "postgres", "uid": "postgres-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "postgres-ds" },
+          "format": "table",
+          "rawSql": "SELECT revenue FROM analytics.daily_sales WHERE sale_date = CURRENT_DATE",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "currencyUSD", "decimals": 2 }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Units Sold Today",
+      "gridPos": { "x": 12, "y": 1, "w": 6, "h": 4 },
+      "datasource": { "type": "postgres", "uid": "postgres-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "postgres-ds" },
+          "format": "table",
+          "rawSql": "SELECT units_sold FROM analytics.daily_sales WHERE sale_date = CURRENT_DATE",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Active Users (last hour)",
+      "description": "Distinct user_id in raw.events over the last hour - not a dbt model, straight from raw since customer_metrics doesn't exist yet.",
+      "gridPos": { "x": 18, "y": 1, "w": 6, "h": 4 },
+      "datasource": { "type": "postgres", "uid": "postgres-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "postgres-ds" },
+          "format": "table",
+          "rawSql": "SELECT count(DISTINCT user_id) AS active_users FROM raw.events WHERE event_timestamp > now() - interval '1 hour'",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Conversion Rate (view -> purchase, last hour)",
+      "description": "PURCHASE events / PRODUCT_VIEW events in the last hour, from raw.events directly - product_performance's per-product conversion_rate is deferred.",
+      "gridPos": { "x": 0, "y": 5, "w": 6, "h": 4 },
+      "datasource": { "type": "postgres", "uid": "postgres-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "postgres-ds" },
+          "format": "table",
+          "rawSql": "SELECT CASE WHEN count(*) FILTER (WHERE event_type = 'PRODUCT_VIEW') = 0 THEN 0 ELSE round(100.0 * count(*) FILTER (WHERE event_type = 'PURCHASE') / count(*) FILTER (WHERE event_type = 'PRODUCT_VIEW'), 2) END AS conversion_rate FROM raw.events WHERE event_timestamp > now() - interval '1 hour'",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 7,
+      "type": "barchart",
+      "title": "Event Type Breakdown (last 24h)",
+      "gridPos": { "x": 6, "y": 5, "w": 9, "h": 8 },
+      "datasource": { "type": "postgres", "uid": "postgres-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "postgres-ds" },
+          "format": "table",
+          "rawSql": "SELECT event_type, count(*) AS count FROM raw.events WHERE event_timestamp > now() - interval '24 hours' GROUP BY event_type ORDER BY count DESC",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "options": { "xField": "event_type" }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Daily Sales Revenue (analytics.daily_sales)",
+      "gridPos": { "x": 15, "y": 5, "w": 9, "h": 8 },
+      "datasource": { "type": "postgres", "uid": "postgres-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "postgres-ds" },
+          "format": "time_series",
+          "rawSql": "SELECT sale_date::timestamp AS time, revenue FROM analytics.daily_sales ORDER BY sale_date",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] }
+    },
+    {
+      "id": 9,
+      "type": "row",
+      "title": "Streaming Metrics (Kafka / kafka-exporter / Prometheus)",
+      "gridPos": { "x": 0, "y": 13, "w": 24, "h": 1 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Events / sec (ecommerce-events)",
+      "description": "rate() of the main topic's per-partition offsets, summed across partitions.",
+      "gridPos": { "x": 0, "y": 14, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+          "expr": "sum(rate(kafka_topic_partition_current_offset{topic=\"ecommerce-events\"}[1m]))",
+          "legendFormat": "events/sec",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Consumer Lag",
+      "description": "design.md section 19 - how far each consumer group is behind. Should hover near 0 while a consumer is running and traffic is steady.",
+      "gridPos": { "x": 12, "y": 14, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+          "expr": "kafka_consumergroup_lag_sum{consumergroup=\"ingestion-service\", topic=\"ecommerce-events\"}",
+          "legendFormat": "ingestion-service",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+          "expr": "kafka_consumergroup_lag_sum{consumergroup=\"retry-service\", topic=\"ecommerce-events-retry\"}",
+          "legendFormat": "retry-service",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "DLQ Message Rate",
+      "description": "rate() of ecommerce-events-dlq's offset - how fast rejected/failed events are accumulating (design.md section 12).",
+      "gridPos": { "x": 0, "y": 22, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+          "expr": "sum(rate(kafka_topic_partition_current_offset{topic=\"ecommerce-events-dlq\"}[5m]))",
+          "legendFormat": "DLQ msgs/sec",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+    },
+    {
+      "id": 13,
+      "type": "stat",
+      "title": "DLQ Total Messages",
+      "description": "Current offset of ecommerce-events-dlq, summed across partitions - total rejected events ever produced to the DLQ (not net of replays).",
+      "gridPos": { "x": 12, "y": 22, "w": 6, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+          "expr": "sum(kafka_topic_partition_current_offset{topic=\"ecommerce-events-dlq\"})",
+          "legendFormat": "DLQ total",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 14,
+      "type": "stat",
+      "title": "Active ingestion-service Members",
+      "description": "How many consumer instances are currently in the ingestion-service group (design.md section 26 - consumer groups).",
+      "gridPos": { "x": 18, "y": 22, "w": 6, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+          "expr": "kafka_consumergroup_members{consumergroup=\"ingestion-service\"}",
+          "legendFormat": "members",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    }
+  ]
+}

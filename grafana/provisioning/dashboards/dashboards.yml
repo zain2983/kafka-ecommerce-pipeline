@@ -1,0 +1,15 @@
+# Points Grafana at ./grafana/dashboards (mounted into the container at
+# /var/lib/grafana/dashboards - see docker-compose.yml) and auto-loads
+# every dashboard JSON file found there on startup.
+apiVersion: 1
+
+providers:
+  - name: ecommerce-dashboards
+    orgId: 1
+    folder: ""
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
