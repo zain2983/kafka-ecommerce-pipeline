@@ -617,6 +617,34 @@ docker compose up -d
 python3 tests/grafana/test_monitoring_resilience.py
 ```
 
+## 18. Dockerized producer/ingestion/retry (Phase 13)
+
+As of Phase 13, `producer/`, `ingestion/main.py`, and `ingestion/retry_main.py`
+each have a `Dockerfile` and run as services (`producer`, `ingestion`,
+`retry`) in `docker-compose.yml`, alongside kafka/postgres/grafana/etc.
+Same code as every phase before this, just packaged - they talk to Kafka
+over the INTERNAL listener (`kafka:29092`) and to `POSTGRES_HOST=postgres`
+instead of `localhost`, since they're containers on the compose network now.
+
+```bash
+docker compose up -d --build   # brings up everything, including producer/ingestion/retry
+docker compose logs -f producer ingestion retry
+```
+
+**Don't run these at the same time as the test suite below.** Nearly
+every test in this file starts its own `app.main`/`app.retry_main`
+subprocess on the host, using the same default consumer group ids
+(`ingestion-service`/`retry-service`) as the dockerized services. Two
+members in the same group just split partitions between them (that's
+what consumer groups are for - see section 3 above) rather than erroring,
+so tests won't crash, but their lag/row-count assertions assume they're
+the only consumer in the group and will be flaky or wrong if the
+containerized ones are also running. Stop them first:
+
+```bash
+docker compose stop producer ingestion retry
+```
+
 ## Generating some real traffic to inspect
 
 ```bash
@@ -624,6 +652,8 @@ cd producer
 EVENTS_PER_SECOND=20 python3 -m app.main
 # Ctrl+C to stop - it flushes and prints final sent/delivered/failed counts
 ```
+
+Or, now that it's dockerized (Phase 13): `docker compose up -d producer`.
 
 ## Consumer env vars added in Phase 7 / Phase 8 / Phase 9
 

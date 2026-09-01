@@ -160,6 +160,66 @@ services:
     # Phase 12 - same reasoning as prometheus/kafka-exporter above.
     restart: on-failure
 
+  # Phase 13: the producer and ingestion services ran on the host through
+  # Phases 1-12 (`python3 -m app.main`); this is the same code, unchanged,
+  # just packaged and run in containers now. Both talk to Kafka over the
+  # INTERNAL listener (kafka:29092) since they're containers on this
+  # compose network - the PLAINTEXT listener (localhost:9092) stays for
+  # host-run tools (tests/, manual scripts).
+  producer:
+    build: ./producer
+    container_name: ecommerce-producer
+
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+    # Same reasoning as kafka-exporter/prometheus/grafana above: come
+    # back on your own after a transient crash instead of staying down
+    # until someone notices.
+    restart: on-failure
+
+  ingestion:
+    build: ./ingestion
+    container_name: ecommerce-ingestion
+
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      POSTGRES_HOST: postgres
+
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+    restart: on-failure
+
+  # Same image as ingestion (its Dockerfile's default CMD runs app.main),
+  # just with the command overridden to run the retry consumer instead -
+  # see tests/README.md section 12/13 for what this consumes from
+  # (ecommerce-events-retry) and what it does on a repeat failure
+  # (bounces back to the DLQ with retry_count incremented).
+  retry:
+    build: ./ingestion
+    container_name: ecommerce-retry
+    command: ["python", "-m", "app.retry_main"]
+
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      POSTGRES_HOST: postgres
+
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+    restart: on-failure
+
 volumes:
   kafka_data:
   postgres_data:
