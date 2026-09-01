@@ -63,6 +63,11 @@ class EventConsumer:
                 # commit() explicitly, once per message, right after the
                 # database confirms the write.
                 "enable.auto.commit": False,
+                # Fired whenever an ASYNCHRONOUS commit (see commit()/
+                # commit_offsets() below) completes, successfully or not -
+                # purely for visibility, never load-bearing for
+                # correctness (see those methods for why).
+                "on_commit": self._on_commit,
             }
         )
         self._consumer.subscribe(
@@ -87,23 +92,46 @@ class EventConsumer:
         revoked = sorted(p.partition for p in partitions)
         logger.info("[%s] partitions REVOKED (rebalance starting): %s", self.instance_id, revoked)
 
+    def _on_commit(self, err, partitions):
+        if err is not None:
+            logger.warning("[%s] async offset commit failed: %s", self.instance_id, err)
+
     def poll(self, timeout: float = 1.0):
         """Return one raw Kafka Message, or None if nothing arrived within timeout."""
         return self._consumer.poll(timeout)
 
     def commit(self, msg):
         """
-        Synchronously commit the offset for a single message. Blocking
-        (asynchronous=False) means "commit" really does mean "durably
-        recorded before we move on" every single time, at the cost of one
-        network round-trip per call.
+        Commit the offset for a single message, ASYNCHRONOUSLY.
+
+        This used to be a blocking (asynchronous=False) call, on the
+        reasoning that blocking means "commit" really does mean "durably
+        recorded before we move on." In practice (design.md section 25,
+        Phase 12 - confirmed against a real Kafka broker restart, see
+        tests/ingestion/test_failure_recovery_kafka.py) that blocking
+        call has NO bounded timeout: under coordinator instability it
+        can hang for minutes rather than failing fast, and while it's
+        hung this process never calls poll() again - which Kafka's
+        max.poll.interval.ms (default 5 minutes) treats as "this
+        consumer is dead" and evicts it from the group entirely, turning
+        a transient hiccup into a much bigger outage than the one that
+        caused it.
+
+        Async commits return immediately and can never block poll() like
+        that. This doesn't weaken correctness: design.md section 10's
+        rule was always "don't commit BEFORE the write is confirmed,"
+        never "block until the commit itself is durable" - and a commit
+        that silently fails just means those messages get re-processed
+        on restart, which idempotency (section 11) already makes safe.
+        _on_commit() above logs failures for visibility only.
         """
-        self._consumer.commit(message=msg, asynchronous=False)
+        self._consumer.commit(message=msg, asynchronous=True)
 
     def commit_offsets(self, offsets_by_partition: dict):
         """
-        Synchronously commit multiple partitions' offsets in a single
-        network round-trip (design.md section 10.1 - batched commits).
+        Commit multiple partitions' offsets in a single request,
+        ASYNCHRONOUSLY - see commit() above for why blocking is
+        deliberately avoided.
 
         offsets_by_partition maps partition -> next offset to read on
         resume (i.e. the offset of the last successfully-handled message
@@ -124,7 +152,7 @@ class EventConsumer:
             TopicPartition(self.topic, partition, offset)
             for partition, offset in offsets_by_partition.items()
         ]
-        self._consumer.commit(offsets=offsets, asynchronous=False)
+        self._consumer.commit(offsets=offsets, asynchronous=True)
 
     @staticmethod
     def deserialize(msg) -> dict:

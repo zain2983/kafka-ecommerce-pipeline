@@ -19,14 +19,16 @@ tests/
 │   ├── test_failure_recovery_postgres.py    kills postgres mid-stream, restarts it, confirms recovery
 │   ├── test_failure_recovery_crash.py       SIGKILLs the consumer mid-stream, restarts it, confirms recovery
 │   ├── test_dedup_stress.py                 hammers the pipeline with duplicates, confirms zero land as rows
-│   └── test_dlq_flow.py                     full DLQ pipeline: reject -> DLQ -> replay -> fix -> recovered
+│   ├── test_dlq_flow.py                     full DLQ pipeline: reject -> DLQ -> replay -> fix -> recovered
+│   └── test_failure_recovery_kafka.py       stops/restarts the Kafka broker itself, confirms recovery
 ├── postgres/
 │   ├── test_database.py          tests EventDatabase's idempotent insert directly, no Kafka
 │   └── inspect_raw_events.py     inspects what's actually in raw.events
 ├── dbt/
 │   └── test_daily_sales.py       inserts known rows, runs `dbt build`, verifies the aggregation is correct
 └── grafana/
-    └── verify_stack.py           confirms Grafana/Prometheus/kafka-exporter are wired up correctly
+    ├── verify_stack.py               confirms Grafana/Prometheus/kafka-exporter are wired up correctly
+    └── test_monitoring_resilience.py kills kafka-exporter, confirms the pipeline is unaffected + it recovers
 ```
 
 ## Setup (once)
@@ -436,7 +438,46 @@ docker compose up -d
 python3 tests/ingestion/test_dlq_flow.py
 ```
 
-## 14. dbt - `staging`/`analytics` models (Phase 10)
+## 14. `test_failure_recovery_kafka.py` - Kafka broker outage (Phase 12)
+
+Every earlier failure-recovery test kills Postgres or the ingestion
+consumer - this one kills the piece of infrastructure BOTH the producer
+and consumer depend on: Kafka itself.
+
+1. Starts the real producer and consumer, lets them run briefly, then
+   stops `ecommerce-kafka`.
+2. Confirms both processes stay alive through the outage (no crash) -
+   librdkafka retries broker connections transparently, but that's only
+   true if nothing in `main.py`'s loop chokes on `poll()` returning
+   `None` indefinitely.
+3. Restarts Kafka, then confirms recovery by producing a few freshly-
+   tagged events and checking they land in `raw.events` - deliberately
+   NOT by watching Kafka-reported consumer-group lag hit exactly 0,
+   which turned out to be a flaky signal given this project's own
+   batched offset commits (see the file's docstring for the full story).
+
+```bash
+docker compose up -d
+python3 tests/ingestion/test_failure_recovery_kafka.py
+```
+
+This one is slow - a consumer already joined to the group before the
+outage doesn't notice its coordinator is gone until its own ~45s
+session timeout elapses, so a full run can take several minutes. That's
+Kafka's own client behavior working as designed, not something to
+optimize around; the timeout here is set generously rather than tightly
+for exactly that reason.
+
+While building this test it caught two real bugs, both now fixed in
+`ingestion/app/kafka_consumer.py`: an unhandled exception that used to
+crash the consumer on a coordinator hiccup, and a more serious one - the
+offset-commit call used to be blocking with no timeout, which under
+coordinator instability could hang long enough to starve the poll loop
+entirely and get the consumer evicted from its group via Kafka's
+`max.poll.interval.ms`. Commits are asynchronous now specifically
+because of this.
+
+## 15. dbt - `staging`/`analytics` models (Phase 10)
 
 The dbt project lives in `dbt/`, separate from the Python packages under
 `producer/`/`ingestion/`. It reads `raw.events` (populated by the
@@ -489,7 +530,7 @@ docker compose up -d
 python3 tests/dbt/test_daily_sales.py
 ```
 
-## 15. Grafana / Prometheus / kafka-exporter (Phase 11)
+## 16. Grafana / Prometheus / kafka-exporter (Phase 11)
 
 `docker compose up -d` now also brings up three more services:
 
@@ -543,7 +584,40 @@ docker compose up -d
 python3 tests/grafana/verify_stack.py
 ```
 
+## 17. `test_monitoring_resilience.py` - kill the monitoring stack, not the pipeline (Phase 12)
 
+Every earlier failure-recovery test kills something in the pipeline's
+critical path. This one kills `kafka-exporter` - pure observability
+tooling that nothing in `ingestion/app/*` even imports or configures -
+and confirms the pipeline genuinely doesn't care:
+
+1. SIGKILLs `kafka-exporter`, then starts a real ingestion consumer and
+   confirms it ingests a fresh event normally while kafka-exporter stays
+   dead the whole time.
+2. Confirms Prometheus marks the scrape target `down` rather than
+   silently keeping stale data.
+3. Confirms `restart: on-failure` is actually configured on the
+   container, then brings it back explicitly.
+
+   Read the file's docstring for why step 3 doesn't just wait for the
+   restart policy to fire on its own: Docker deliberately does NOT
+   apply `restart: on-failure` when a container is stopped via an
+   explicit API call (`docker kill`/`docker stop`, including a `kill`
+   sent through `docker exec` - all count as "you told me to stop,"
+   which Docker won't override) - only when the process dies
+   completely unprompted. The policy is real (it's what silently fixed
+   a genuine kafka-exporter startup crash back in Phase 11) - there's
+   just no reliable way to force that specific kind of crash on demand
+   from outside the container.
+4. Once it's back, confirms Prometheus resumes scraping and re-runs
+   `verify_stack.py` to confirm the whole dashboard works again.
+
+```bash
+docker compose up -d
+python3 tests/grafana/test_monitoring_resilience.py
+```
+
+## Generating some real traffic to inspect
 
 ```bash
 cd producer

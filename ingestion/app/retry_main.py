@@ -41,6 +41,8 @@ import signal
 import sys
 import time
 
+from confluent_kafka import KafkaException
+
 from app.database import DatabaseConfig, EventDatabase
 from app.dedup_cache import DedupCache
 from app.dlq import DLQProducer, DLQProducerConfig
@@ -127,6 +129,26 @@ def main():
 
     consumed = recovered_count = redlq_count = 0
 
+    def _safe_commit(msg):
+        """
+        Commits are always for a message whose outcome is already fully
+        handled (recovered into Postgres, or requeued to the DLQ).
+        kafka_consumer.py's commit() is asynchronous, so a coordinator
+        hiccup (e.g. right after a broker restart - confirmed against a
+        real Kafka restart, see
+        tests/ingestion/test_failure_recovery_kafka.py) can't block this
+        loop; failures are logged via its on_commit callback, not raised
+        here. This try/except is defense-in-depth for genuine call-time
+        errors only (e.g. RuntimeError on an already-closed consumer).
+        Not committing just means this message gets redelivered on
+        restart, which is safe either way (idempotent insert, or a
+        slightly redundant extra DLQ record).
+        """
+        try:
+            consumer.commit(msg)
+        except KafkaException as e:
+            logger.warning("Offset commit failed, will be re-processed on restart: %s", e)
+
     while not _shutdown:
         msg = consumer.poll(1.0)
         if msg is None:
@@ -150,7 +172,7 @@ def main():
                 msg.offset(),
                 e,
             )
-            consumer.commit(msg)
+            _safe_commit(msg)
             continue
 
         retry_count = record.get("retry_count", 0)
@@ -188,7 +210,7 @@ def main():
         except (json.JSONDecodeError, TypeError) as e:
             redlq_count += 1
             _requeue_to_dlq("UNPARSEABLE", [f"malformed JSON payload: {e}"])
-            consumer.commit(msg)
+            _safe_commit(msg)
             continue
 
         event = normalize_event(raw_event)
@@ -197,7 +219,7 @@ def main():
         if errors:
             redlq_count += 1
             _requeue_to_dlq("VALIDATION_FAILED", errors)
-            consumer.commit(msg)
+            _safe_commit(msg)
             continue
 
         event_id = event["event_id"]
@@ -223,7 +245,7 @@ def main():
 
         recovered_count += 1
         logger.info("%s RECOVERED event_id=%s - now in raw.events", log_ctx, event_id)
-        consumer.commit(msg)
+        _safe_commit(msg)
 
         if consumed % 20 == 0:
             logger.info(

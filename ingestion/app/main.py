@@ -72,6 +72,36 @@ sending a write it already knows would be a no-op. The cache is allowed
 to miss real duplicates (it starts empty on every restart, and evicts
 old entries once full or aged out) precisely because the DB constraint
 is what actually has to be right, not the cache.
+
+Kafka broker outages (Phase 12): a broker restart briefly leaves the
+group coordinator unavailable. Two problems showed up here, confirmed
+against a real Kafka restart (not theoretical - see
+tests/ingestion/test_failure_recovery_kafka.py), both in
+kafka_consumer.py's commit():
+
+  1. commit_offsets() used to raise KafkaException during that window,
+     unhandled, crashing the process outright - much worse than the
+     DB-outage case, since nothing about a coordinator hiccup means
+     anything is actually wrong.
+  2. Worse, and non-obvious: that commit() call used to be BLOCKING
+     (asynchronous=False) with no bounded timeout. Under sustained
+     coordinator instability it could hang for minutes rather than
+     failing fast - and while hung, this loop never called poll()
+     again, which Kafka's max.poll.interval.ms (default 5 minutes)
+     treats as "this consumer is dead," evicting it from the group
+     entirely and turning a transient hiccup into a far bigger one.
+
+Both are fixed at the source: kafka_consumer.py's commit()/
+commit_offsets() are asynchronous now, which can't block poll() no
+matter how unstable the coordinator is, with failures logged (not
+retried) via an on_commit callback purely for visibility. This is safe
+by the same logic as everything else in this section: a commit that
+never lands just means those messages get re-processed on restart -
+idempotency (section 11) already made that a no-op, not a bug - and
+since `pending_offsets` is cleared as soon as the (fire-and-forget)
+commit is issued rather than held for confirmation, the NEXT
+successful commit naturally supersedes any offset an earlier one
+failed to land, with no explicit retry bookkeeping needed.
 """
 
 import logging
@@ -79,6 +109,8 @@ import os
 import signal
 import sys
 import time
+
+from confluent_kafka import KafkaException
 
 from app.database import DatabaseConfig, EventDatabase
 from app.dedup_cache import DedupCache
@@ -193,9 +225,24 @@ def main():
     def _flush_pending(reason: str):
         nonlocal pending_offsets, messages_since_commit, last_commit_at
         if pending_offsets:
-            consumer.commit_offsets(pending_offsets)
-            logger.debug("Flushed %d partition(s)' offsets (%s)", len(pending_offsets), reason)
-            pending_offsets = {}
+            try:
+                # Asynchronous (kafka_consumer.py's commit_offsets()) -
+                # can't block this loop, so pending_offsets is cleared
+                # as soon as the commit is ISSUED, not confirmed. If it
+                # fails (logged via on_commit, not here), that's fine:
+                # every message it covered is already safely in
+                # Postgres or DLQ'd, and the NEXT successful commit will
+                # naturally cover a higher offset anyway, superseding
+                # it - no explicit retry bookkeeping needed. A
+                # RuntimeError here (e.g. called on an already-closed
+                # consumer) is the only thing actually worth catching.
+                consumer.commit_offsets(pending_offsets)
+                logger.debug(
+                    "Flushed %d partition(s)' offsets (%s)", len(pending_offsets), reason
+                )
+                pending_offsets = {}
+            except KafkaException as e:
+                logger.warning("Offset commit call failed (%s): %s", reason, e)
         messages_since_commit = 0
         last_commit_at = time.monotonic()
 

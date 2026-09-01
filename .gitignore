@@ -10,3 +10,6 @@ dbt/target/
 dbt/logs/
 dbt/dbt_packages/
 dbt/.user.yml
+
+# scripts/run.sh's producer/consumer logs
+/logs/

@@ -115,6 +115,11 @@ services:
     depends_on:
       - kafka-exporter
 
+    # Phase 12 - same reasoning as kafka-exporter's restart policy: if
+    # this crashes for any reason, come back on your own rather than
+    # leaving Grafana's Prometheus datasource dead until someone notices.
+    restart: on-failure
+
   grafana:
     image: grafana/grafana-oss:latest
     container_name: ecommerce-grafana
@@ -151,6 +156,9 @@ services:
         condition: service_healthy
       prometheus:
         condition: service_started
+
+    # Phase 12 - same reasoning as prometheus/kafka-exporter above.
+    restart: on-failure
 
 volumes:
   kafka_data:
