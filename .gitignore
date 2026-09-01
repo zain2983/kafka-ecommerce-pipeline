@@ -4,3 +4,9 @@ __pycache__/
 .venv/
 venv/
 .DS_Store
+
+# dbt-generated (dbt/profiles.yml and dbt/requirements.txt ARE tracked)
+dbt/target/
+dbt/logs/
+dbt/dbt_packages/
+dbt/.user.yml

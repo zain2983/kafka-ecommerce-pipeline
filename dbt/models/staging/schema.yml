@@ -1,0 +1,27 @@
+version: 2
+
+models:
+  - name: stg_events
+    description: >
+      One row per event, same grain as raw.events, with only the
+      Kafka-tracing columns dropped. See stg_events.sql for why nothing
+      here re-does validation/normalization.
+    columns:
+      - name: event_id
+        tests:
+          - unique
+          - not_null
+      - name: event_type
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - USER_SIGNUP
+                  - PRODUCT_VIEW
+                  - ADD_TO_CART
+                  - CHECKOUT_STARTED
+                  - PURCHASE
+      - name: event_timestamp
+        tests:
+          - not_null

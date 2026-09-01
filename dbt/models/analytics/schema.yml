@@ -1,0 +1,19 @@
+version: 2
+
+models:
+  - name: daily_sales
+    description: One row per calendar day with PURCHASE activity (design.md section 18).
+    columns:
+      - name: sale_date
+        tests:
+          - unique
+          - not_null
+      - name: orders
+        tests:
+          - not_null
+      - name: units_sold
+        tests:
+          - not_null
+      - name: revenue
+        tests:
+          - not_null

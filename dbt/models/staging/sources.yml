@@ -1,0 +1,43 @@
+version: 2
+
+sources:
+  - name: raw
+    description: >
+      Landing schema populated by the ingestion consumer
+      (ingestion/app/database.py), not by dbt. design.md section 15.
+    schema: raw
+    tables:
+      - name: events
+        description: >
+          One row per successfully validated, deduplicated event
+          (design.md section 11 - event_id is a primary key, so this is
+          already exactly-once from dbt's point of view even though
+          Kafka delivery is at-least-once).
+        columns:
+          - name: event_id
+            description: Unique identifier for the event; primary key.
+            tests:
+              - unique
+              - not_null
+          - name: event_type
+            description: One of USER_SIGNUP, PRODUCT_VIEW, ADD_TO_CART, CHECKOUT_STARTED, PURCHASE.
+            tests:
+              - not_null
+          - name: event_timestamp
+            description: When the event occurred, as reported by the producer.
+            tests:
+              - not_null
+          - name: user_id
+            description: The user who triggered the event. Null only in malformed input that somehow reached raw (shouldn't happen - validator.py requires it).
+          - name: product_id
+            description: The product involved, where applicable (not present on USER_SIGNUP/CHECKOUT_STARTED).
+          - name: quantity
+            description: Units involved, where applicable (ADD_TO_CART, PURCHASE).
+          - name: unit_price
+            description: Price per unit, where applicable (PURCHASE only).
+          - name: ingested_at
+            description: When the ingestion consumer wrote this row.
+          - name: kafka_partition
+            description: Kafka partition this event was read from - traces the row back to its source message.
+          - name: kafka_offset
+            description: Kafka offset this event was read from - traces the row back to its source message.

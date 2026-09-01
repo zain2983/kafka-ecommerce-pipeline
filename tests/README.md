@@ -20,9 +20,11 @@ tests/
 │   ├── test_failure_recovery_crash.py       SIGKILLs the consumer mid-stream, restarts it, confirms recovery
 │   ├── test_dedup_stress.py                 hammers the pipeline with duplicates, confirms zero land as rows
 │   └── test_dlq_flow.py                     full DLQ pipeline: reject -> DLQ -> replay -> fix -> recovered
-└── postgres/
-    ├── test_database.py          tests EventDatabase's idempotent insert directly, no Kafka
-    └── inspect_raw_events.py     inspects what's actually in raw.events
+├── postgres/
+│   ├── test_database.py          tests EventDatabase's idempotent insert directly, no Kafka
+│   └── inspect_raw_events.py     inspects what's actually in raw.events
+└── dbt/
+    └── test_daily_sales.py       inserts known rows, runs `dbt build`, verifies the aggregation is correct
 ```
 
 ## Setup (once)
@@ -47,6 +49,12 @@ re-run, it's idempotent):
 ```bash
 docker cp kafka/init/create_topics.sh ecommerce-kafka:/tmp/create_topics.sh
 docker exec ecommerce-kafka bash /tmp/create_topics.sh
+```
+
+For the dbt section below, install dbt into the same venv (once):
+
+```bash
+pip install -r dbt/requirements.txt
 ```
 
 ## 1. `test_event_generator.py` - test the generator alone
@@ -424,6 +432,59 @@ invalid (bad quantity) event through the real ingestion consumer, then:
 ```bash
 docker compose up -d
 python3 tests/ingestion/test_dlq_flow.py
+```
+
+## 14. dbt - `staging`/`analytics` models (Phase 10)
+
+The dbt project lives in `dbt/`, separate from the Python packages under
+`producer/`/`ingestion/`. It reads `raw.events` (populated by the
+ingestion consumer, not by dbt) and builds:
+
+```
+raw.events
+     │
+     ▼
+staging.stg_events        (view - same grain as raw.events, drops
+     │                      Kafka-tracing columns)
+     ▼
+analytics.daily_sales     (table - one row per calendar day of
+                            PURCHASE activity: orders, units_sold, revenue)
+```
+
+The profile lives at `dbt/profiles.yml` (inside the repo, not
+`~/.dbt/profiles.yml`) and reads the same `POSTGRES_*` env vars as
+`ingestion/app/database.py`, so run everything with
+`DBT_PROFILES_DIR=.` from inside `dbt/`:
+
+```bash
+cd dbt
+DBT_PROFILES_DIR=. dbt debug   # sanity-check the Postgres connection
+DBT_PROFILES_DIR=. dbt run     # build stg_events + daily_sales
+DBT_PROFILES_DIR=. dbt test    # schema tests: not_null/unique/accepted_values
+                                # + the custom singular test in dbt/tests/
+DBT_PROFILES_DIR=. dbt build   # run + test together
+```
+
+`macros/generate_schema_name.sql` overrides dbt's default schema-name
+prefixing so models land in exactly `staging`/`analytics` (the schemas
+`postgres/init/01_create_schemas.sql` already creates), not
+`public_staging`/`public_analytics`.
+
+### `test_daily_sales.py` - verify the aggregation is actually correct
+
+`dbt test`'s schema tests catch nulls/uniqueness/bad categories, but
+none of them check that `daily_sales.sql`'s SUM/COUNT math is right.
+This test inserts 3 known PURCHASE rows directly into `raw.events`
+(bypassing Kafka - same reasoning as `test_database.py`) on a
+far-in-the-past date real traffic will never use, runs the real
+`dbt build`, and checks `analytics.daily_sales` for that date against
+hand-computed expected totals. Cleans up its rows (and rebuilds
+`daily_sales` so the table doesn't keep a stale row for that date)
+whether it passes or fails, so re-running is always safe.
+
+```bash
+docker compose up -d
+python3 tests/dbt/test_daily_sales.py
 ```
 
 ## Generating some real traffic to inspect

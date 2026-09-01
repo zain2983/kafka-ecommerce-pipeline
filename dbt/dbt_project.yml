@@ -1,0 +1,26 @@
+name: 'ecommerce_analytics'
+version: '1.0.0'
+config-version: 2
+
+profile: 'ecommerce_analytics'
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+clean-targets: ["target", "dbt_packages"]
+
+# design.md section 15: PostgreSQL has three logical layers (raw,
+# staging, analytics). raw is populated by the ingestion consumer, not
+# dbt - these two directories are dbt's staging/analytics halves.
+# Schema names are taken literally (see macros/generate_schema_name.sql)
+# rather than dbt's default "<target_schema>_<custom_schema>" prefixing,
+# so these land in exactly the `staging`/`analytics` schemas that
+# postgres/init/01_create_schemas.sql already creates.
+models:
+  ecommerce_analytics:
+    staging:
+      +schema: staging
+      +materialized: view
+    analytics:
+      +schema: analytics
+      +materialized: table
