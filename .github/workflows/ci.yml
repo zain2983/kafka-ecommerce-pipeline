@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # No Kafka/Postgres involved - pure code, run on every push/PR in
+  # seconds. Kept separate from integration-tests so a unit failure
+  # doesn't wait on ~10+ minutes of Docker-backed tests to report.
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r producer/requirements.txt
+          pip install -r ingestion/requirements.txt
+
+      - name: test_event_generator.py
+        run: python3 tests/producer/test_event_generator.py --count 2000 --quiet
+
+      - name: test_validator.py
+        run: python3 tests/ingestion/test_validator.py
+
+      - name: test_dedup_cache.py
+        run: python3 tests/ingestion/test_dedup_cache.py
+
+  # Exercises the real pipeline against real Kafka/Postgres containers,
+  # in the same order tests/README.md walks through by hand - dedup,
+  # offset-commit ordering, and DLQ handling all require the real
+  # infra, not mocks, so this is the part 29.1 of docs/design.md
+  # actually asks to be wired into CI. test_failure_recovery_kafka.py
+  # alone can take several minutes (it waits out a real ~45s Kafka
+  # session timeout), so the job timeout is generous.
+  integration-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r producer/requirements.txt
+          pip install -r ingestion/requirements.txt
+          pip install -r dbt/requirements.txt
+
+      # Only the infra services - NOT producer/ingestion/retry, which
+      # would join the same consumer groups the tests use and make
+      # their lag/row-count assertions flaky (see tests/README.md
+      # section 18).
+      - name: Start Kafka, Postgres, and the monitoring stack
+        run: docker compose up -d kafka postgres kafka-exporter node-exporter prometheus grafana
+
+      - name: Wait for Kafka and Postgres to be healthy
+        run: |
+          wait_healthy() {
+            local container="$1"
+            local timeout="${2:-90}"
+            local waited=0
+            while [ "$waited" -lt "$timeout" ]; do
+              status="$(docker inspect "$container" --format '{{.State.Health.Status}}' 2>/dev/null || echo unknown)"
+              [ "$status" = "healthy" ] && return 0
+              sleep 3
+              waited=$((waited + 3))
+            done
+            echo "${container} did not become healthy within ${timeout}s (status: ${status})" >&2
+            return 1
+          }
+          wait_healthy ecommerce-kafka
+          wait_healthy ecommerce-postgres
+
+      - name: Create Kafka topics
+        run: |
+          docker cp kafka/init/create_topics.sh ecommerce-kafka:/tmp/create_topics.sh
+          docker exec ecommerce-kafka bash /tmp/create_topics.sh
+
+      - name: Build initial dbt models
+        working-directory: dbt
+        run: DBT_PROFILES_DIR=. dbt run
+
+      - name: Wait for Prometheus's first scrape
+        run: sleep 12
+
+      - name: test_database.py
+        run: python3 tests/postgres/test_database.py
+
+      - name: test_end_to_end.py
+        run: python3 tests/ingestion/test_end_to_end.py
+
+      - name: test_dedup_stress.py
+        run: python3 tests/ingestion/test_dedup_stress.py
+
+      - name: test_dlq_flow.py
+        run: python3 tests/ingestion/test_dlq_flow.py
+
+      - name: test_failure_recovery_postgres.py
+        run: python3 tests/ingestion/test_failure_recovery_postgres.py
+
+      - name: test_failure_recovery_crash.py
+        run: python3 tests/ingestion/test_failure_recovery_crash.py
+
+      - name: test_failure_recovery_kafka.py
+        run: python3 tests/ingestion/test_failure_recovery_kafka.py
+
+      - name: test_sales_by_interval.py
+        run: python3 tests/dbt/test_sales_by_interval.py
+
+      - name: verify_stack.py
+        run: python3 tests/grafana/verify_stack.py
+
+      - name: test_monitoring_resilience.py
+        run: python3 tests/grafana/test_monitoring_resilience.py
+
+      - name: Dump container logs on failure
+        if: failure()
+        run: docker compose logs --tail=200
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

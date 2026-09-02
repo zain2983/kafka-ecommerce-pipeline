@@ -1,8 +1,14 @@
 # Manual testing scripts
 
-These are exploratory/manual scripts, not an automated pytest suite. They
-exist so you can poke at the system by hand and see what's actually
-happening.
+These are exploratory/manual scripts, not an automated pytest suite -
+you can still run any of them by hand as described below. They're also
+wired into CI (`.github/workflows/ci.yml`): the no-Kafka scripts
+(`test_event_generator.py`, `test_validator.py`, `test_dedup_cache.py`)
+run as a fast `unit-tests` job on every push/PR, and everything else
+that needs the real stack (dedup stress, DLQ flow, Kafka/Postgres/crash
+recovery, the dbt aggregation check, monitoring resilience) runs as a
+slower `integration-tests` job against real Kafka/Postgres/Grafana
+containers, same as running them by hand with `docker compose up -d`.
 
 ```
 tests/

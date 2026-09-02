@@ -1260,14 +1260,33 @@ including DLQ/retry/dedup) is built and verified end-to-end against
 synthetic data. Before swapping the synthetic producer for a real data
 source, the following gaps should be closed, in order:
 
-## 29.1 CI / automated tests
+## 29.1 CI / automated tests - done
 
-`tests/` is currently a set of manual/exploratory scripts (see
+`tests/` was a set of manual/exploratory scripts (see
 `tests/README.md`) - real coverage (dedup stress, Kafka/Postgres
-kill-recovery, DLQ replay), but nothing runs them automatically, so
-regressions are only caught by hand. Wire these into a CI pipeline
-(e.g. GitHub Actions) that runs on push/PR, so a change can't silently
-break dedup, offset-commit ordering, or DLQ handling.
+kill-recovery, DLQ replay), but nothing ran them automatically, so
+regressions were only caught by hand. `.github/workflows/ci.yml` now
+wires them into GitHub Actions on every push/PR to `main`, as two jobs:
+
+- `unit-tests` - the three scripts that need no Kafka/Postgres
+  (`test_event_generator.py`, `test_validator.py`,
+  `test_dedup_cache.py`), so a pure-code regression reports back in
+  seconds.
+- `integration-tests` - brings up the real `kafka`/`postgres`/
+  `kafka-exporter`/`node-exporter`/`prometheus`/`grafana` containers
+  (deliberately not `producer`/`ingestion`/`retry` - see
+  `tests/README.md` section 18 on why those would collide with the
+  tests' own consumer groups), waits for health checks, creates the
+  Kafka topics, runs an initial `dbt run`, then runs every remaining
+  script in `tests/` against that real stack: idempotent inserts,
+  end-to-end, dedup stress, the full DLQ flow, Postgres/crash/Kafka
+  failure recovery, the dbt aggregation check, and Grafana/Prometheus
+  wiring + monitoring resilience. Containers are always torn down
+  afterward, and their logs are dumped on failure. Job timeout is 30
+  minutes - `test_failure_recovery_kafka.py` alone can take several
+  minutes waiting out a real Kafka session timeout, which is expected
+  client behavior, not something to optimize around (see
+  `tests/README.md` section 14).
 
 ## 29.2 Alerting on top of Prometheus
 
