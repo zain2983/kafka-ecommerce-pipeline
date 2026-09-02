@@ -575,8 +575,9 @@ connections. `kafka` and `postgres` both have a `healthcheck:` now, and
 could leave `kafka-exporter` crashed (it treats "broker not ready yet"
 as fatal and exits, no retry) or Grafana's Postgres datasource stuck
 showing a connection error, in both cases requiring a manual restart to
-recover. `kafka-exporter` also gets `restart: on-failure` as a second
-line of defense.
+recover. `kafka-exporter` also gets `restart: unless-stopped` (like
+every other service - see Phase 12/13 history) as a second line of
+defense.
 
 ### `verify_stack.py` - confirm everything is actually wired up correctly
 
@@ -602,12 +603,12 @@ and confirms the pipeline genuinely doesn't care:
    dead the whole time.
 2. Confirms Prometheus marks the scrape target `down` rather than
    silently keeping stale data.
-3. Confirms `restart: on-failure` is actually configured on the
+3. Confirms `restart: unless-stopped` is actually configured on the
    container, then brings it back explicitly.
 
    Read the file's docstring for why step 3 doesn't just wait for the
    restart policy to fire on its own: Docker deliberately does NOT
-   apply `restart: on-failure` when a container is stopped via an
+   apply a restart policy when a container is stopped via an
    explicit API call (`docker kill`/`docker stop`, including a `kill`
    sent through `docker exec` - all count as "you told me to stop,"
    which Docker won't override) - only when the process dies

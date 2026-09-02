@@ -11,16 +11,20 @@ tooling, nothing in the ingestion path depends on it - and confirms:
      Monitoring is a passenger, not a dependency.
   2. Prometheus notices the target went down (health=down) instead of
      silently keeping stale data forever.
-  3. `restart: on-failure` (docker-compose.yml) is actually configured
-     on the container - confirmed by reading the running container's
-     own HostConfig, not just by eyeballing the YAML.
+  3. `restart: unless-stopped` (docker-compose.yml) is actually
+     configured on the container - confirmed by reading the running
+     container's own HostConfig, not just by eyeballing the YAML.
+     (Originally `on-failure` when this test was written in Phase 12;
+     changed repo-wide to `unless-stopped` so every service - not just
+     kafka-exporter - comes back after a full VM reboot, not just a
+     process crash. See docs/DEPLOYMENT.md's "Bugs already fixed" #2.)
   4. Once it's back (see note below on how "back" happens here) and
      Prometheus resumes scraping it, Grafana's dashboard queries work
      again - reusing verify_stack.py's own checks rather than
      duplicating them.
 
 IMPORTANT - what this does NOT (and structurally cannot) prove: that
-`restart: on-failure` fires automatically for THIS kind of kill.
+the restart policy fires automatically for THIS kind of kill.
 Docker's restart policies deliberately do not apply when a container is
 stopped via an explicit API call (docker kill / docker stop / an
 in-container `kill` sent through docker exec all count) - only when the
@@ -208,13 +212,13 @@ def main():
             time.sleep(2)
         expect(saw_down, "Prometheus marks the kafka-exporter target as down", failures)
 
-        # --- 3. restart: on-failure is actually configured (static
+        # --- 3. restart: unless-stopped is actually configured (static
         # check - see the module docstring for why this kill method
         # can't exercise the policy live) ---
         policy = restart_policy(KAFKA_EXPORTER_CONTAINER)
         expect(
-            policy == "on-failure",
-            f"kafka-exporter's restart policy is 'on-failure' (found: '{policy}')",
+            policy == "unless-stopped",
+            f"kafka-exporter's restart policy is 'unless-stopped' (found: '{policy}')",
             failures,
         )
     finally:
