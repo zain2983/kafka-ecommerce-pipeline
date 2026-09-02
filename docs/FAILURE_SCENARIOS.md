@@ -190,10 +190,10 @@ target went down rather than silently serving stale data, and that once
 dashboard panel query works again (reusing
 `tests/grafana/verify_stack.py`'s own checks).
 
-Also confirms `restart: on-failure` (`docker-compose.yml`) is actually
-configured on `kafka-exporter`, `prometheus`, and `grafana` - though
-see the note on `docker kill` below for why that's checked statically
-rather than triggered live in this specific test.
+Also confirms `restart: unless-stopped` (`docker-compose.yml`) is
+actually configured on `kafka-exporter` - though see the note on
+`docker kill` below for why that's checked statically rather than
+triggered live in this specific test.
 
 ---
 
@@ -281,12 +281,94 @@ group's member list), restart the process - a fresh instance has
 rejoined instantly in every case observed, including the one that
 prompted this section.
 
+## Data loss / backup story (design.md section 29.3)
+
+Everything above covers services being temporarily *unreachable* -
+Postgres/Kafka/the consumer come back and no data is lost, because the
+two guarantees at the top of this document hold. None of it covers the
+volume itself being lost or corrupted (disk failure, `docker volume rm`
+by accident, a bad `docker compose down -v`). `postgres_data` and
+`kafka_data` were both single Docker volumes with no dump/snapshot
+process at all until this section - here's what closes that gap, and
+why the two services get different answers.
+
+### Postgres: a real, tested backup
+
+`scripts/backup_postgres.sh` runs `pg_dump` (custom format - self-
+compressed, restorable with `pg_restore`) against the live
+`ecommerce-postgres` container, on a cron schedule (every 6 hours on
+the deployed VM - see `docs/DEPLOYMENT.md`'s "Backups" step), pruning
+dumps older than `BACKUP_RETENTION_DAYS` (7, by default). This gives
+Postgres an RPO (recovery point objective) of **at most 6 hours** - if
+`postgres_data` is destroyed the instant before a scheduled backup, up
+to 6 hours of ingested events could be lost; typically much less, since
+that's the worst case, not the average.
+
+`tests/postgres/test_backup_restore.py` proves this isn't just "the
+script exits 0": it inserts a known row, runs the real backup script,
+restores the resulting dump into a scratch database, and confirms the
+row is actually there - the same drill documented as a manual restore
+procedure in `backup_postgres.sh`'s own header, automated and run in CI
+on every push (`.github/workflows/ci.yml`) so a change that silently
+broke backups (a schema change pg_dump can't handle, a permissions
+issue, a renamed container) would fail loudly instead of being
+discovered the first time an actual restore is needed.
+
+Why 6 hours, not more or less frequent: this project's traffic is
+synthetic and disposable (design.md's stated goal is "free, local,
+reproducible, and portfolio-ready," not a real business with a real
+uptime SLA), so a multi-hour RPO is an accepted tradeoff against
+runtime cost/complexity, not a compromise forced by a real constraint.
+Tightening it is a one-line change (`BACKUP_RETENTION_DAYS`/the cron
+schedule in `docs/DEPLOYMENT.md`) whenever real data actually justifies it.
+
+### Kafka: a documented accepted-loss window, not a backup mechanism
+
+Kafka here is a single broker with replication factor 1 *everywhere*
+(`docker-compose.yml`'s `KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR`/
+`KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR`/topic creation in
+`kafka/init/create_topics.sh` all set RF=1) - there is no second copy
+of any message anywhere. If `kafka_data` is lost, everything on it is
+gone; no `pg_dump`-equivalent exists for Kafka in this project, and
+none is being added.
+
+That's a deliberate decision, not a silent gap, for two reasons:
+
+1. **Kafka here is a transport layer, not the system of record.**
+   Every message that matters is meant to land in `raw.events`
+   (Postgres) within seconds of being produced - that's what the
+   consumer's job *is*. Once a message is durably in Postgres, losing
+   Kafka's copy of it is a non-event. Postgres's own backup story above
+   is what actually protects against permanent data loss; Kafka's job
+   is to survive the *transient* outages covered earlier in this
+   document, not to be a second, independent archive.
+2. **Real replication (RF≥3, multiple brokers) is the standard fix, and
+   is explicitly out of scope for a single-VM demo project** - it needs
+   multiple broker processes/volumes/disks to actually protect against
+   anything (RF=3 pointed at one disk protects against nothing a single
+   broker doesn't already have), which is real infrastructure cost and
+   complexity this project's stated goals (design.md: "free, local,
+   reproducible, and portfolio-ready") don't call for.
+
+**The accepted data-loss window for Kafka, stated plainly:** anything
+sitting in `ecommerce-events`/`ecommerce-events-dlq`/
+`ecommerce-events-retry` that the relevant consumer hasn't yet
+committed an offset for, at the moment `kafka_data` is destroyed, is
+gone permanently. In steady-state operation this is small - the
+Grafana dashboard's Consumer Lag panels (and the `ConsumerLagGrowingUnbounded`
+alert, design.md section 29.2) are what make that window visible, since
+lag *is* the size of this exposure at any given moment. It grows
+exactly when something is already wrong (a stuck consumer, a Kafka
+outage in progress) - which is precisely when both those signals would
+already be firing.
+
 ## Note on `docker kill` vs. a genuine crash
 
 Several tests above SIGKILL a container to simulate a crash. Worth
 knowing if you extend this: Docker's restart policies (`restart:
-on-failure`) deliberately do **not** apply when a container is stopped
-via an explicit API call - `docker kill`, `docker stop`, and even a
+unless-stopped`, used everywhere in this project) deliberately do
+**not** apply when a container is stopped via an explicit API call -
+`docker kill`, `docker stop`, and even a
 `kill` sent through `docker exec` all count as "you told me to stop,"
 which Docker assumes was intentional and won't override. The policy
 only fires when the containerized process dies completely unprompted.

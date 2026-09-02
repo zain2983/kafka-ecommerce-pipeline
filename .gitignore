@@ -14,3 +14,6 @@ dbt/.user.yml
 
 # scripts/run.sh's producer/consumer logs
 /logs/
+
+# scripts/backup_postgres.sh's output - real dumps, not something to commit
+/backups/

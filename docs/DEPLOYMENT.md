@@ -279,7 +279,37 @@ CRON_LINE="*/15 * * * * /home/deploy/DE-Demo-Project/scripts/run_dbt.sh >> /home
 ( crontab -l 2>/dev/null | grep -v "run_dbt.sh" ; echo "$CRON_LINE" ) | crontab -
 ```
 
-## Step 9 — Verify end to end
+## Step 9 — Backups
+
+design.md section 29.3: `postgres_data` was a single Docker volume with
+no dump/snapshot process at all until this step. Set up the recurring
+Postgres backup the same way as the dbt refresh above — cron running
+`scripts/backup_postgres.sh` (real `pg_dump`, custom format, into
+`backups/postgres/`, with old dumps pruned automatically — see that
+script's own header for the restore procedure):
+
+```bash
+cd /home/deploy/DE-Demo-Project
+mkdir -p backups/postgres
+CRON_LINE="0 */6 * * * /home/deploy/DE-Demo-Project/scripts/backup_postgres.sh >> /home/deploy/DE-Demo-Project/logs/postgres_backup_cron.log 2>&1"
+( crontab -l 2>/dev/null | grep -v "backup_postgres.sh" ; echo "$CRON_LINE" ) | crontab -
+```
+
+Every 6 hours, retaining 7 days (`BACKUP_RETENTION_DAYS` in `.env` to
+change), is the accepted RPO/storage tradeoff for this project — see
+`docs/FAILURE_SCENARIOS.md`'s "Data loss / backup story" section for
+the full reasoning, including the equivalent decision made for Kafka
+(no backup mechanism, a documented accepted-loss window instead).
+
+Confirm it actually works before moving on, the same drill
+`tests/postgres/test_backup_restore.py` automates in CI:
+
+```bash
+./scripts/backup_postgres.sh
+ls -la backups/postgres/
+```
+
+## Step 10 — Verify end to end
 
 ```bash
 python3 -c "

@@ -1325,15 +1325,34 @@ confirmed to actually fire and reach Alertmanager by killing
 kafka-exporter and watching it go from `pending` to `firing` at exactly
 the 2-minute mark).
 
-## 29.3 Backup story for Postgres and Kafka
+## 29.3 Backup story for Postgres and Kafka - done
 
-`postgres_data` and `kafka_data` are single Docker volumes with no
-dump/snapshot process. `docs/FAILURE_SCENARIOS.md` covers services
-being temporarily *unreachable*, not data loss or corruption. Add a
-recurring `pg_dump` (or volume snapshot) for Postgres, and decide on
-an acceptable data-loss window for Kafka (single broker, replication
-factor 1 everywhere) - even a documented "acceptable loss" answer is
-better than the current silent gap.
+`postgres_data` and `kafka_data` were single Docker volumes with no
+dump/snapshot process, and `docs/FAILURE_SCENARIOS.md` only covered
+services being temporarily *unreachable*, not data loss or corruption.
+The two services got different answers, matched to what's actually
+possible/warranted for each:
+
+- **Postgres** — `scripts/backup_postgres.sh` runs a real `pg_dump`
+  (custom format) against the live container on a cron schedule (every
+  6 hours on the VM, pruning dumps older than `BACKUP_RETENTION_DAYS`
+  - see `docs/DEPLOYMENT.md`'s "Backups" step), giving an RPO of at
+  most 6 hours. `tests/postgres/test_backup_restore.py` proves this
+  isn't just "the script exits 0": it inserts a known row, runs the
+  real backup, restores the dump into a scratch database, and confirms
+  the row survived - wired into CI (`.github/workflows/ci.yml`) so a
+  change that silently broke backups fails loudly instead of being
+  discovered the first time a real restore is needed.
+- **Kafka** — a documented accepted-loss window, not a backup
+  mechanism, since RF=1 everywhere makes replication the only real fix
+  and multi-broker replication is out of scope for a single-VM demo.
+  `docs/FAILURE_SCENARIOS.md`'s new "Data loss / backup story" section
+  states the decision plainly: anything sitting in Kafka that hasn't
+  been consumed (i.e. current consumer lag) at the moment `kafka_data`
+  is destroyed is gone permanently - accepted because Kafka here is a
+  transport layer, not the system of record, and because 29.2's
+  Consumer Lag panels/`ConsumerLagGrowingUnbounded` alert already make
+  the size of that exposure visible at any given moment.
 
 These three are scoped intentionally narrow: they harden the
 *current* synthetic-data pipeline. Changes required specifically for

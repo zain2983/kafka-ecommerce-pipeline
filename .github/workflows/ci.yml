@@ -110,6 +110,9 @@ jobs:
       - name: test_database.py
         run: python3 tests/postgres/test_database.py
 
+      - name: test_backup_restore.py
+        run: python3 tests/postgres/test_backup_restore.py
+
       - name: test_end_to_end.py
         run: python3 tests/ingestion/test_end_to_end.py
 

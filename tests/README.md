@@ -6,9 +6,10 @@ wired into CI (`.github/workflows/ci.yml`): the no-Kafka scripts
 (`test_event_generator.py`, `test_validator.py`, `test_dedup_cache.py`)
 run as a fast `unit-tests` job on every push/PR, and everything else
 that needs the real stack (dedup stress, DLQ flow, Kafka/Postgres/crash
-recovery, the dbt aggregation check, monitoring resilience) runs as a
-slower `integration-tests` job against real Kafka/Postgres/Grafana
-containers, same as running them by hand with `docker compose up -d`.
+recovery, the backup/restore drill, the dbt aggregation check,
+monitoring resilience) runs as a slower `integration-tests` job against
+real Kafka/Postgres/Grafana containers, same as running them by hand
+with `docker compose up -d`.
 
 ```
 tests/
@@ -29,9 +30,10 @@ tests/
 │   └── test_failure_recovery_kafka.py       stops/restarts the Kafka broker itself, confirms recovery
 ├── postgres/
 │   ├── test_database.py          tests EventDatabase's idempotent insert directly, no Kafka
+│   ├── test_backup_restore.py    runs the real backup script, restores the dump, confirms a known row survives
 │   └── inspect_raw_events.py     inspects what's actually in raw.events
 ├── dbt/
-│   └── test_daily_sales.py       inserts known rows, runs `dbt build`, verifies the aggregation is correct
+│   └── test_sales_by_interval.py inserts known rows, runs `dbt build`, verifies the aggregation is correct
 └── grafana/
     ├── verify_stack.py               confirms Grafana/Prometheus/kafka-exporter are wired up correctly
     └── test_monitoring_resilience.py kills kafka-exporter, confirms the pipeline is unaffected + it recovers
@@ -273,7 +275,30 @@ python3 tests/postgres/test_database.py
 Test rows use event_ids prefixed `evt_test_db_...` and are cleaned up
 automatically at the start of each run, so re-running is always safe.
 
-## 7. `inspect_raw_events.py` - see what's actually in Postgres
+## 7. `test_backup_restore.py` - backup/restore drill, automated (design.md 29.3)
+
+`scripts/backup_postgres.sh` (the same script cron runs on the VM, see
+`docs/DEPLOYMENT.md`'s "Backups" section) was previously only checked by
+hand. This test proves the whole loop actually works, not just that
+`pg_dump` exits 0:
+
+1. Inserts one known, uniquely-tagged row into `raw.events`.
+2. Runs `scripts/backup_postgres.sh` for real.
+3. Confirms it produced exactly one new, non-empty `.dump` file.
+4. Restores that dump into a scratch database (`backup_restore_test` -
+   never touches the real `ecommerce` database).
+5. Confirms the known row is present there.
+
+```bash
+docker compose up -d postgres
+python3 tests/postgres/test_backup_restore.py
+```
+
+Cleans up the scratch database, the dump file, and the test row in a
+`finally` block regardless of pass/fail, so re-running is always safe
+and this never leaves a stray dump sitting in `backups/postgres/`.
+
+## 8. `inspect_raw_events.py` - see what's actually in Postgres
 
 The Postgres-side counterpart to `inspect_kafka_topic.py`. Prints row
 count vs. distinct `event_id` count (these should always be equal - a
@@ -286,7 +311,7 @@ python3 tests/postgres/inspect_raw_events.py --limit 20
 python3 tests/postgres/inspect_raw_events.py --user-id user_42
 ```
 
-## 8. `test_end_to_end.py` - the full pipeline, automated
+## 9. `test_end_to_end.py` - the full pipeline, automated
 
 This is the automated version of what we did by hand while building
 Phase 5: produce a small set of known events straight to Kafka (one
@@ -308,7 +333,7 @@ drain any other backlog sitting in the topic before it can confirm
 lag=0 - if you've been generating a lot of traffic, the first run after
 that may take longer (default timeout: 30s).
 
-## 9. `test_failure_recovery_postgres.py` - Postgres outage recovery (Phase 7)
+## 10. `test_failure_recovery_postgres.py` - Postgres outage recovery (Phase 7)
 
 Proves design.md sections 10/13/25's "transient PostgreSQL outage" flow
 actually holds, not just that the retry-loop code reads correctly:
@@ -342,7 +367,7 @@ loudly" behavior every other outage gets. `_connect_with_retry()` in
 total failure, so a `docker exec` shell watching group membership never
 sees a "phantom" member sitting there for a stale session timeout.
 
-## 10. `test_failure_recovery_crash.py` - process crash recovery (Phase 7)
+## 11. `test_failure_recovery_crash.py` - process crash recovery (Phase 7)
 
 Same idea, different failure mode: instead of the *dependency* going
 down, the ingestion process itself dies abruptly (SIGKILL - no signal
@@ -371,7 +396,7 @@ Takes roughly a minute, mostly spent waiting out that session timeout -
 that wait is Kafka correctly doing its job, not something to work
 around.
 
-## 11. `test_dedup_stress.py` - heavy duplicate injection (Phase 8)
+## 12. `test_dedup_stress.py` - heavy duplicate injection (Phase 8)
 
 Goes well beyond `test_end_to_end.py`'s single deliberately-repeated
 event: sends 40 unique events x 5 copies each (200 messages total),
@@ -390,7 +415,7 @@ docker compose up -d
 python3 tests/ingestion/test_dedup_stress.py
 ```
 
-## 12. `replay_dlq.py` - republish DLQ records for another attempt (Phase 9)
+## 13. `replay_dlq.py` - republish DLQ records for another attempt (Phase 9)
 
 Operational tool, not a test: reads whatever's currently on
 `ecommerce-events-dlq` and republishes it to `ecommerce-events-retry`,
@@ -421,7 +446,7 @@ like). This tool is for "try the exact same thing again," which is
 still useful on its own for a transient rejection, or just to move a
 record off the DLQ and into the retry consumer's metrics.
 
-## 13. `test_dlq_flow.py` - full DLQ pipeline, automated (Phase 9)
+## 14. `test_dlq_flow.py` - full DLQ pipeline, automated (Phase 9)
 
 The most end-to-end test in this repo. Sends one unparseable and one
 invalid (bad quantity) event through the real ingestion consumer, then:
@@ -444,7 +469,7 @@ docker compose up -d
 python3 tests/ingestion/test_dlq_flow.py
 ```
 
-## 14. `test_failure_recovery_kafka.py` - Kafka broker outage (Phase 12)
+## 15. `test_failure_recovery_kafka.py` - Kafka broker outage (Phase 12)
 
 Every earlier failure-recovery test kills Postgres or the ingestion
 consumer - this one kills the piece of infrastructure BOTH the producer
@@ -483,7 +508,7 @@ entirely and get the consumer evicted from its group via Kafka's
 `max.poll.interval.ms`. Commits are asynchronous now specifically
 because of this.
 
-## 15. dbt - `staging`/`analytics` models (Phase 10)
+## 16. dbt - `staging`/`analytics` models (Phase 10)
 
 The dbt project lives in `dbt/`, separate from the Python packages under
 `producer/`/`ingestion/`. It reads `raw.events` (populated by the
@@ -536,7 +561,7 @@ docker compose up -d
 python3 tests/dbt/test_daily_sales.py
 ```
 
-## 16. Grafana / Prometheus / kafka-exporter (Phase 11)
+## 17. Grafana / Prometheus / kafka-exporter (Phase 11)
 
 `docker compose up -d` now also brings up three more services:
 
@@ -591,7 +616,7 @@ docker compose up -d
 python3 tests/grafana/verify_stack.py
 ```
 
-## 17. `test_monitoring_resilience.py` - kill the monitoring stack, not the pipeline (Phase 12)
+## 18. `test_monitoring_resilience.py` - kill the monitoring stack, not the pipeline (Phase 12)
 
 Every earlier failure-recovery test kills something in the pipeline's
 critical path. This one kills `kafka-exporter` - pure observability
@@ -624,7 +649,7 @@ docker compose up -d
 python3 tests/grafana/test_monitoring_resilience.py
 ```
 
-## 18. Dockerized producer/ingestion/retry (Phase 13)
+## 19. Dockerized producer/ingestion/retry (Phase 13)
 
 As of Phase 13, `producer/`, `ingestion/main.py`, and `ingestion/retry_main.py`
 each have a `Dockerfile` and run as services (`producer`, `ingestion`,
@@ -675,7 +700,7 @@ Or, now that it's dockerized (Phase 13): `docker compose up -d producer`.
   (default `300.0`) - size and max age for the in-memory dedup cache
   (Phase 8, `ingestion/app/dedup_cache.py`) that lets the consumer skip
   a Postgres round-trip for an event_id it's already handled recently.
-  Lowering `DEDUP_CACHE_SIZE` is how section 11's stress test forces the
+  Lowering `DEDUP_CACHE_SIZE` is how section 12's stress test forces the
   cache to evict and prove the Postgres constraint still catches what
   the cache misses.
 - `KAFKA_DLQ_TOPIC` (default `ecommerce-events-dlq`) - where `main.py`
