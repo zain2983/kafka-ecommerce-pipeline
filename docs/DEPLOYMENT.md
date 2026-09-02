@@ -260,16 +260,18 @@ from `.env`, and confirm the dashboard is showing live data.
 
 ## CI-driven deploys (`.github/workflows/deploy.yml`)
 
-Once the VM is on Option B (a real `git clone`), pushing a change to
-`main` doesn't reach the VM by itself — deploys are a separate,
-explicit step from `.github/workflows/deploy.yml`, run manually from
-the Actions tab ("Run workflow" on `Deploy to VM`, currently
-`workflow_dispatch`-only on purpose, see the workflow's own comment for
-why). It SSHes into the VM with a **dedicated, restricted** key and
-runs `scripts/deploy_remote.sh` there, which does exactly what Step 7
-above does by hand: `git fetch && git reset --hard origin/main`,
-`docker compose up -d --build`, wait for kafka/postgres healthchecks,
-re-create Kafka topics.
+Once the VM is on Option B (a real `git clone`), a push to `main`
+reaches the VM automatically: `.github/workflows/deploy.yml` triggers
+via `workflow_run` once `ci.yml` reports success on `main` (it will
+NOT deploy a red build — see the `if:` on the `deploy` job). It SSHes
+into the VM with a **dedicated, restricted** key and runs
+`scripts/deploy_remote.sh` there, which does what Step 7 above does by
+hand: `git fetch && git reset --hard origin/main`, bring up
+kafka/postgres/monitoring, wait for health, re-create Kafka topics,
+then rebuild/restart producer/ingestion/retry (see that script's own
+comment for why infra-and-topics comes before the app services on this
+VM specifically). `workflow_dispatch` still works too, for a manual
+one-off re-run.
 
 ### One-time setup for this (already done for the current VM)
 
@@ -292,11 +294,11 @@ re-create Kafka topics.
    - `DEPLOY_HOST` — the VM's IP
    - `DEPLOY_USER` — `deploy`
 
-From then on, "deploy" is: push to `main` (or merge a PR — CI runs
-either way), then manually trigger the `Deploy to VM` workflow once
-you're satisfied. The VM directory is a deploy target now, not
-somewhere to hand-edit — `deploy_remote.sh`'s `git reset --hard` will
-discard any local changes made directly on the box.
+From then on, "deploy" is just: push to `main` (or merge a PR). CI runs,
+and if it's green, `Deploy to VM` fires on its own. The VM directory is
+a deploy target now, not somewhere to hand-edit — `deploy_remote.sh`'s
+`git reset --hard` will discard any local changes made directly on the
+box.
 
 ## Bugs already fixed in this repo (informational — you won't hit these deploying from current `main`)
 

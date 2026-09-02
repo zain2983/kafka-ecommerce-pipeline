@@ -1,16 +1,23 @@
 name: Deploy to VM
 
-# Manual for now, on purpose - triggered from the Actions tab
-# ("Run workflow") rather than automatically after CI, so each deploy
-# is a deliberate choice while this flow is still new. Once it's
-# trusted, this can be changed to a `workflow_run` trigger gated on
-# ci.yml succeeding on main.
+# Auto-deploys after ci.yml passes on main (workflow_run below), so a
+# merge to main reaches the VM without a manual step. workflow_dispatch
+# is kept too, for a one-off manual re-deploy (e.g. re-running after a
+# VM-side fix with no code change).
 on:
   workflow_dispatch: {}
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # workflow_dispatch has no `workflow_run` conclusion to check -
+    # always run for that trigger. For workflow_run, only deploy if
+    # ci.yml actually passed (don't ship on a red build).
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     steps:
       - name: Trust the VM's host key
         run: |
