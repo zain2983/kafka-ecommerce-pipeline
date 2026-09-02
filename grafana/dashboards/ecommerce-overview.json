@@ -2,7 +2,7 @@
   "title": "E-Commerce Streaming Platform",
   "uid": "ecommerce-overview",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "refresh": "5s",
   "time": { "from": "now-1h", "to": "now" },
@@ -232,6 +232,118 @@
           "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
           "expr": "kafka_consumergroup_members{consumergroup=\"ingestion-service\"}",
           "legendFormat": "members",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 15,
+      "type": "row",
+      "title": "Host Resources (node-exporter / VM)",
+      "gridPos": { "x": 0, "y": 26, "w": 24, "h": 1 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "CPU Usage",
+      "description": "1 - idle time, averaged across cores. This VM has a small core count, so this is the panel to watch under load.",
+      "gridPos": { "x": 0, "y": 27, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+          "expr": "100 - (avg(rate(node_cpu_seconds_total{mode=\"idle\"}[1m])) * 100)",
+          "legendFormat": "CPU %",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "max": 100, "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Memory Used",
+      "gridPos": { "x": 12, "y": 27, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+          "expr": "node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes",
+          "legendFormat": "used",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+          "expr": "node_memory_MemTotal_bytes",
+          "legendFormat": "total",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] }
+    },
+    {
+      "id": 18,
+      "type": "stat",
+      "title": "Load Average (1m)",
+      "description": "Above the VM's core count means work is queuing, not just busy.",
+      "gridPos": { "x": 0, "y": 35, "w": 6, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+          "expr": "node_load1",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none", "decimals": 2 }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 19,
+      "type": "stat",
+      "title": "Disk Free (/)",
+      "gridPos": { "x": 6, "y": 35, "w": 6, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+          "expr": "node_filesystem_avail_bytes{mountpoint=\"/rootfs\"}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 20,
+      "type": "stat",
+      "title": "Memory Available",
+      "gridPos": { "x": 12, "y": 35, "w": 6, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+          "expr": "node_memory_MemAvailable_bytes",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 21,
+      "type": "stat",
+      "title": "CPU Cores",
+      "gridPos": { "x": 18, "y": 35, "w": 6, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+          "expr": "count(node_cpu_seconds_total{mode=\"idle\"})",
           "refId": "A"
         }
       ],

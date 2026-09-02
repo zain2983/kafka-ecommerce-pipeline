@@ -25,7 +25,7 @@ datasources:
       postgresVersion: 1600
       timescaledb: false
     secureJsonData:
-      password: ecommerce
+      password: $POSTGRES_PASSWORD
 
   - name: Prometheus
     uid: prometheus-ds

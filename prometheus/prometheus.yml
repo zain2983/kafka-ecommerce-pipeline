@@ -9,3 +9,10 @@ scrape_configs:
   - job_name: kafka
     static_configs:
       - targets: ["kafka-exporter:9308"]
+
+  # Host-level CPU/mem/disk metrics via node-exporter (docker-compose.yml),
+  # so resource pressure on the VM itself is visible in Prometheus/Grafana
+  # instead of only checkable via a manual SSH + `docker stats`.
+  - job_name: node
+    static_configs:
+      - targets: ["node-exporter:9100"]
