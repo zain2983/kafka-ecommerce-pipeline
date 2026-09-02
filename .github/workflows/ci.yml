@@ -43,6 +43,20 @@ jobs:
   integration-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Force IPv4 loopback for every host-run client in this job (the
+    # test scripts' own producer/consumer connections, and the
+    # `python3 -m app.main`/`app.retry_main` subprocesses they spawn,
+    # which inherit this env). Without this, "localhost" occasionally
+    # resolves to ::1 first on GitHub-hosted runners even though
+    # docker-compose.yml only publishes these ports on 127.0.0.1 (see
+    # KAFKA_BIND/POSTGRES_BIND defaults) - librdkafka/psycopg2 then log
+    # a failed ipv6 connection attempt before falling back, and that
+    # extra round trip has been enough to flake a test outright rather
+    # than just add latency. 127.0.0.1 is unambiguous, so this removes
+    # the race instead of hoping the fallback is always fast enough.
+    env:
+      KAFKA_BOOTSTRAP_SERVERS: 127.0.0.1:9092
+      POSTGRES_HOST: 127.0.0.1
     steps:
       - uses: actions/checkout@v4
 
