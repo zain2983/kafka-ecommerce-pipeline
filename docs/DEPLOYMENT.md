@@ -105,9 +105,10 @@ sudo ufw --force enable
 sudo systemctl enable --now fail2ban
 ```
 
-Everything else (Kafka, Postgres, Prometheus, kafka-exporter,
-node-exporter) is bound to `127.0.0.1` in `docker-compose.yml` (see
-Step 6), so ufw is a second layer of defense, not the only one.
+Everything else (Kafka, Postgres, Prometheus, Alertmanager,
+kafka-exporter, node-exporter) is bound to `127.0.0.1` in
+`docker-compose.yml` (see Step 6), so ufw is a second layer of defense,
+not the only one.
 
 ## Step 5 — Get the code onto the VM
 
@@ -161,6 +162,7 @@ KAFKA_BIND=127.0.0.1
 POSTGRES_BIND=127.0.0.1
 PROMETHEUS_BIND=127.0.0.1
 KAFKA_EXPORTER_BIND=127.0.0.1
+ALERTMANAGER_BIND=127.0.0.1
 EOF
 chmod 600 .env
 ```
@@ -181,6 +183,45 @@ What each variable does:
   `ingestion`/`retry` containers and the Grafana Postgres datasource
   provisioning file (`grafana/provisioning/datasources/datasources.yml`,
   which expands `$POSTGRES_PASSWORD` from the `grafana` container's env).
+
+## Alerting (`prometheus/alerts.yml`, `prometheus/alertmanager.yml`)
+
+design.md section 29.2. Prometheus evaluates three rules against the
+same metrics the Grafana dashboard already charts — consumer lag stuck
+high for 10+ minutes, the DLQ growing at a sustained rate, or a scrape
+target (kafka-exporter/node-exporter) down for 2+ minutes — and fires
+them to the `alertmanager` container, which is what actually notifies
+someone.
+
+`prometheus/alertmanager.yml` ships with its webhook receiver pointed
+at a placeholder URL (`http://localhost:5001/replace-with-a-real-webhook`)
+committed as real config, the same way `prometheus.yml` and the Grafana
+dashboard JSON are — not templated via `.env`, since Alertmanager has no
+built-in env-var expansion for its config file. `docker compose up`
+still starts cleanly with the placeholder in place; alerts fire and
+Alertmanager tries to deliver them, they just go nowhere (visible in
+`docker compose logs alertmanager`) until this is pointed at something
+real:
+
+- **Generic webhook** (default receiver, `ops-webhook`): edit the `url`
+  under `receivers:` in `prometheus/alertmanager.yml` to point at
+  anything that accepts Alertmanager's webhook payload — a low-code
+  automation tool (e.g. an n8n/Zapier webhook trigger), or your own
+  small receiver.
+- **Slack**: uncomment the `ops-slack` receiver block in the same file,
+  fill in a real Slack incoming-webhook URL, and change `route.receiver`
+  from `ops-webhook` to `ops-slack`.
+
+After editing, redeploy (`docker compose up -d alertmanager` restarts
+just that container and picks up the new config) or push to `main` and
+let the CI-driven deploy pick it up on the next run.
+
+To confirm alerts actually reach Alertmanager, briefly kill a container
+an alert covers (e.g. `docker kill ecommerce-kafka-exporter`, then
+`docker compose up -d kafka-exporter` to bring it back once you've
+confirmed it) and check `http://<VM_IP or localhost>:9093/api/v2/alerts`
+after the rule's `for:` window elapses — this is exactly how the
+alerting setup itself was verified during development.
 
 ## Step 7 — Bring the stack up
 

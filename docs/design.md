@@ -1288,14 +1288,42 @@ wires them into GitHub Actions on every push/PR to `main`, as two jobs:
   client behavior, not something to optimize around (see
   `tests/README.md` section 14).
 
-## 29.2 Alerting on top of Prometheus
+## 29.2 Alerting on top of Prometheus - done
 
-`prometheus/prometheus.yml` currently only scrapes kafka-exporter and
-node-exporter into Grafana for manual viewing - there's no
-Alertmanager and no alerting rules. Add rules (and a notification
-channel) for at least: consumer lag growing unbounded, DLQ volume
-spiking, and a service failing its health check - so problems page
-someone instead of waiting to be noticed on the dashboard.
+`prometheus/prometheus.yml` used to only scrape kafka-exporter and
+node-exporter into Grafana for manual viewing - there was no
+Alertmanager and no alerting rules. An `alertmanager` container is now
+part of `docker-compose.yml`, wired to Prometheus via
+`prometheus.yml`'s `alerting:`/`rule_files:` blocks, with
+`prometheus/alerts.yml` defining three rules - the minimum design.md
+asked for:
+
+- `ConsumerLagGrowingUnbounded` - `kafka_consumergroup_lag_sum` (same
+  metric the dashboard's Consumer Lag panel already charts) above 1000
+  for both `ingestion-service` and `retry-service`, sustained for 10
+  minutes straight (a `for:` window, not a bare threshold, since a
+  healthy consumer's lag spikes and drains constantly - only a stalled
+  or overwhelmed one stays pinned above the threshold that long).
+- `DLQVolumeSpiking` - the same expression as the dashboard's "DLQ
+  Message Rate" panel (`rate()` of `ecommerce-events-dlq`'s offset),
+  alerting above ~0.1 msg/sec sustained for 5 minutes.
+- `ServiceHealthCheckFailing` - Prometheus's own `up` metric at 0 for 2
+  minutes, covering both scrape jobs (`kafka` → kafka-exporter, `node`
+  → node-exporter) - the same signal
+  `tests/grafana/test_monitoring_resilience.py` already asserts on via
+  the targets API.
+
+`prometheus/alertmanager.yml` is the notification channel: a webhook
+receiver, committed as real config (not templated via `.env` -
+Alertmanager has no built-in env-var expansion) pointed at a placeholder
+URL by default so `docker compose up` always starts cleanly, with a
+commented-out Slack receiver as the more common real-world swap-in. See
+`docs/DEPLOYMENT.md`'s "Alerting" section for how to point it at a real
+endpoint and how to verify delivery (the same kill-a-container method
+used to verify this setup itself: `ServiceHealthCheckFailing` was
+confirmed to actually fire and reach Alertmanager by killing
+kafka-exporter and watching it go from `pending` to `firing` at exactly
+the 2-minute mark).
 
 ## 29.3 Backup story for Postgres and Kafka
 

@@ -1,0 +1,49 @@
+# Alertmanager config - receives firing/resolved alerts from Prometheus
+# (see prometheus.yml's `alerting:` block and alerts.yml's rules) and
+# actually notifies someone, instead of a problem only being visible to
+# whoever happens to be looking at the Grafana dashboard.
+#
+# Ships pointed at a placeholder webhook URL below, same as
+# prometheus.yml/docker-compose.yml are committed as real, working
+# config rather than a template - Alertmanager has no built-in env-var
+# expansion for its config file, so this follows that same pattern
+# instead of inventing one. `docker compose up` still starts cleanly
+# with the placeholder in place; alerts just fail to deliver anywhere
+# (visible in `docker compose logs alertmanager`) until it's pointed at
+# something real. For an actual deploy, replace the url below with
+# something that consumes Alertmanager's webhook payload (a low-code
+# automation tool, your own small receiver), or swap in the
+# commented-out Slack block, which is the more common real-world choice.
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: "ops-webhook"
+  group_by: ["alertname"]
+  # Don't page 3 times for 3 alerts that fire in the same few seconds
+  # (e.g. Kafka itself going down triggers both lag and health-check
+  # alerts at once) - group them into one notification.
+  group_wait: 30s
+  group_interval: 5m
+  # Re-notify periodically for anything still firing, so a page doesn't
+  # go out once and get lost - not so often it becomes noise.
+  repeat_interval: 4h
+
+receivers:
+  # REPLACE with a real endpoint before relying on this for a real
+  # deploy - see docs/DEPLOYMENT.md's alerting section.
+  - name: "ops-webhook"
+    webhook_configs:
+      - url: "http://localhost:5001/replace-with-a-real-webhook"
+        send_resolved: true
+
+  # Uncomment, fill in a real Slack incoming-webhook URL, and change
+  # route.receiver above to 'ops-slack' to notify Slack instead of/
+  # alongside the generic webhook.
+  # - name: "ops-slack"
+  #   slack_configs:
+  #     - api_url: "https://hooks.slack.com/services/REPLACE/WITH/REAL"
+  #       channel: "#alerts"
+  #       send_resolved: true
+  #       title: '{{ .CommonAnnotations.summary }}'
+  #       text: '{{ .CommonAnnotations.description }}'

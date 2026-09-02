@@ -2,8 +2,20 @@
 # about (design.md section 19 - "Streaming metrics"): per-partition
 # offsets (source for events/sec via rate()), consumer group lag, and
 # ecommerce-events-dlq's own offset (source for DLQ volume).
+#
+# alerts.yml (design.md section 29.2) evaluates rules against these same
+# metrics and fires to Alertmanager below, so the same numbers driving
+# the dashboard are also what pages someone.
 global:
   scrape_interval: 10s
+
+rule_files:
+  - "alerts.yml"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
 
 scrape_configs:
   - job_name: kafka

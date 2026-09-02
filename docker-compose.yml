@@ -141,15 +141,37 @@ services:
 
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus_data:/prometheus
 
     depends_on:
       - kafka-exporter
       - node-exporter
+      - alertmanager
 
     # Phase 12 - same reasoning as kafka-exporter's restart policy: if
     # this crashes for any reason, come back on your own rather than
     # leaving Grafana's Prometheus datasource dead until someone notices.
+    restart: unless-stopped
+
+  # design.md section 29.2: receives alerts Prometheus fires (alerts.yml)
+  # and actually notifies someone - see prometheus/alertmanager.yml for
+  # the notification-channel config and how to point it at Slack/etc.
+  alertmanager:
+    image: prom/alertmanager:latest
+    container_name: ecommerce-alertmanager
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+
+    ports:
+      - "${ALERTMANAGER_BIND:-127.0.0.1}:9093:9093"
+
+    volumes:
+      - ./prometheus/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+
+    # Same reasoning as prometheus/kafka-exporter above.
     restart: unless-stopped
 
   grafana:
@@ -260,3 +282,4 @@ volumes:
   postgres_data:
   prometheus_data:
   grafana_data:
+  alertmanager_data:

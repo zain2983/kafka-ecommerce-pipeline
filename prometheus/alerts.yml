@@ -1,0 +1,79 @@
+# Alerting rules evaluated by Prometheus, fired to Alertmanager
+# (alertmanager.yml), which is what actually notifies someone (design.md
+# section 29.2). Covers the three cases design.md calls out by name:
+# consumer lag growing unbounded, DLQ volume spiking, and a service
+# failing its health check.
+#
+# Metric names/label values here match what's already proven to work
+# elsewhere in this repo - the Grafana dashboard's own panel queries
+# (grafana/dashboards/*.json) and tests/grafana/test_monitoring_resilience.py's
+# target-health check - rather than inventing new ones.
+groups:
+  - name: ecommerce-pipeline
+    rules:
+      # kafka_consumergroup_lag_sum is a gauge, not a counter - a
+      # healthy consumer's lag spikes and drains constantly (a burst of
+      # traffic, a brief restart), which is normal and shouldn't page
+      # anyone. `for: 10m` is what turns "high right now" into "growing
+      # unbounded": it only fires once lag has stayed above the
+      # threshold continuously for 10 straight minutes, which a
+      # draining consumer won't do but a stalled/overwhelmed one will.
+      # Covers both consumer groups this project runs (design.md
+      # section 12/13) - the main ingestion path and the retry path.
+      - alert: ConsumerLagGrowingUnbounded
+        expr: kafka_consumergroup_lag_sum{consumergroup=~"ingestion-service|retry-service"} > 1000
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.consumergroup }} lag stuck above 1000 on {{ $labels.topic }}"
+          description: >-
+            Consumer group {{ $labels.consumergroup }}'s lag on
+            {{ $labels.topic }} has been above 1000 messages for at
+            least 10 minutes straight ({{ $value }} now) - it isn't
+            keeping up with incoming traffic, or it's stopped
+            processing entirely. Check `docker compose logs ingestion`
+            (or `retry`) and tests/kafka/inspect_consumer_group.py.
+
+      # Same expression as the dashboard's "DLQ Message Rate" panel
+      # (grafana/dashboards/*.json), just with a threshold and a
+      # `for:` window turning it into an alert instead of a chart.
+      # >0.1 msg/sec sustained for 5m is ~30+ rejected events in that
+      # window - occasional one-off rejections (a single malformed
+      # event) won't sustain that rate, a systemic problem (a bad
+      # deploy, a schema drift) will.
+      - alert: DLQVolumeSpiking
+        expr: sum(rate(kafka_topic_partition_current_offset{topic="ecommerce-events-dlq"}[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DLQ receiving messages faster than expected"
+          description: >-
+            ecommerce-events-dlq has been growing at {{ $value | printf "%.2f" }}
+            msg/sec for at least 5 minutes - something upstream is
+            producing events the consumer keeps rejecting (design.md
+            section 12). Inspect with
+            `tests/kafka/inspect_kafka_topic.py --topic ecommerce-events-dlq --show`
+            before blindly replaying with `tests/kafka/replay_dlq.py`.
+
+      # `up` is Prometheus's own built-in metric, set to 0 whenever a
+      # scrape target fails - the same signal
+      # test_monitoring_resilience.py already asserts on via the
+      # /api/v1/targets endpoint. Covers both scrape jobs in
+      # prometheus.yml: `kafka` (kafka-exporter - down here usually
+      # means the exporter crashed or lost its connection to the
+      # broker) and `node` (node-exporter - down here means host-level
+      # metrics are blind, or the container itself died).
+      - alert: ServiceHealthCheckFailing
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} target down"
+          description: >-
+            Prometheus has failed to scrape job={{ $labels.job }}
+            (instance={{ $labels.instance }}) for at least 2 minutes.
+            Check `docker ps` for that container's status and
+            `docker compose logs {{ $labels.job }}-exporter`.
