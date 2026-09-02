@@ -50,6 +50,11 @@ wait_healthy ecommerce-postgres
 
 echo "==> Ensuring Kafka topics exist (idempotent)"
 docker cp kafka/init/create_topics.sh ecommerce-kafka:/tmp/create_topics.sh
-docker exec ecommerce-kafka bash /tmp/create_topics.sh >/dev/null
+# Internal listener (localhost:29092), not the external/advertised one
+# (localhost:9092 -> KAFKA_ADVERTISED_HOST, this VM's public IP) - see
+# docs/DEPLOYMENT.md's "Bugs already fixed" #3. Hitting the advertised
+# listener from a process running *inside* the kafka container itself
+# is a hairpin-NAT-style connection that can hang/time out.
+docker exec -e KAFKA_BOOTSTRAP_SERVER=localhost:29092 ecommerce-kafka bash /tmp/create_topics.sh >/dev/null
 
 echo "==> Deploy complete: $(git rev-parse --short HEAD)"
