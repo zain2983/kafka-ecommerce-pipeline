@@ -49,7 +49,7 @@ KAFKA PRODUCER (Python)
 ```
 
 Full design rationale, every architectural decision, and the "why not
-Airflow" discussion live in [`design.md`](design.md).
+Airflow" discussion live in [`docs/design.md`](docs/design.md).
 
 ## What this demonstrates
 
@@ -63,7 +63,7 @@ Airflow" discussion live in [`design.md`](design.md).
 - **Failure recovery, proven not assumed**: Postgres outage, Kafka
   broker outage, and a hard `SIGKILL` of the consumer mid-stream all
   have real, runnable tests confirming zero data loss and zero
-  duplicate rows on recovery - see [`FAILURE_SCENARIOS.md`](FAILURE_SCENARIOS.md).
+  duplicate rows on recovery - see [`docs/FAILURE_SCENARIOS.md`](docs/FAILURE_SCENARIOS.md).
 - **Analytics engineering**: dbt staging/analytics models, schema
   tests, a custom singular test, and a test that verifies the
   aggregation math itself (not just "did dbt run without erroring").
@@ -127,8 +127,8 @@ grafana/          provisioned datasources + the one dashboard, as code
 prometheus/       scrape config for kafka-exporter
 scripts/          setup.sh (one-time) and run.sh (start the pipeline)
 tests/            manual/exploratory test scripts - see tests/README.md
-design.md         full design doc: every decision and its rationale
-FAILURE_SCENARIOS.md   every tested failure mode, how it's proven, how to reproduce it
+docs/design.md         full design doc: every decision and its rationale
+docs/FAILURE_SCENARIOS.md   every tested failure mode, how it's proven, how to reproduce it
 ```
 
 ## Development approach

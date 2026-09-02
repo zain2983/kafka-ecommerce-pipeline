@@ -1250,3 +1250,50 @@ Docker
 ```
 
 The entire platform should remain **free, local, reproducible, and portfolio-ready**.
+
+---
+
+# 29. Roadmap: Hardening Before Real Data
+
+The pipeline itself (Kafka → ingestion → PostgreSQL → dbt → Grafana,
+including DLQ/retry/dedup) is built and verified end-to-end against
+synthetic data. Before swapping the synthetic producer for a real data
+source, the following gaps should be closed, in order:
+
+## 29.1 CI / automated tests
+
+`tests/` is currently a set of manual/exploratory scripts (see
+`tests/README.md`) - real coverage (dedup stress, Kafka/Postgres
+kill-recovery, DLQ replay), but nothing runs them automatically, so
+regressions are only caught by hand. Wire these into a CI pipeline
+(e.g. GitHub Actions) that runs on push/PR, so a change can't silently
+break dedup, offset-commit ordering, or DLQ handling.
+
+## 29.2 Alerting on top of Prometheus
+
+`prometheus/prometheus.yml` currently only scrapes kafka-exporter and
+node-exporter into Grafana for manual viewing - there's no
+Alertmanager and no alerting rules. Add rules (and a notification
+channel) for at least: consumer lag growing unbounded, DLQ volume
+spiking, and a service failing its health check - so problems page
+someone instead of waiting to be noticed on the dashboard.
+
+## 29.3 Backup story for Postgres and Kafka
+
+`postgres_data` and `kafka_data` are single Docker volumes with no
+dump/snapshot process. `docs/FAILURE_SCENARIOS.md` covers services
+being temporarily *unreachable*, not data loss or corruption. Add a
+recurring `pg_dump` (or volume snapshot) for Postgres, and decide on
+an acceptable data-loss window for Kafka (single broker, replication
+factor 1 everywhere) - even a documented "acceptable loss" answer is
+better than the current silent gap.
+
+These three are scoped intentionally narrow: they harden the
+*current* synthetic-data pipeline. Changes required specifically for
+ingesting a real data source (event-type/schema assumptions currently
+duplicated across the producer, `ingestion/app/validator.py`, and the
+dbt staging tests; the flat `raw.events` schema; the PURCHASE-only
+revenue model in `dbt/models/analytics/sales_by_interval.sql`; rigid
+timestamp parsing; no schema registry) are deliberately deferred until
+that real source is actually in hand, to avoid designing against
+assumptions that may turn out wrong.
