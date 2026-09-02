@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Phase 10 test: confirms daily_sales.sql's aggregation is actually
+Phase 10 test: confirms sales_by_interval.sql's aggregation is actually
 correct, not just that `dbt run` exits 0.
 
 Inserts a small, known set of PURCHASE rows directly into raw.events
 (bypassing Kafka entirely - this is testing dbt's SQL logic, not
 ingestion, the same reasoning test_database.py uses to talk to Postgres
-directly) on a fixed, far-in-the-past date that real pipeline traffic
-will never land on, so this test's expected totals are exactly its own
-rows - nothing else in raw.events can contribute to that day.
+directly) all timestamped exactly on a fixed, far-in-the-past 15-minute
+bucket boundary that real pipeline traffic will never land on, so this
+test's expected totals are exactly its own rows - nothing else in
+raw.events can contribute to that bucket.
 
 Runs the real `dbt build` (run + test) as a subprocess, then checks
-analytics.daily_sales for that date against hand-computed expected
-orders/units_sold/revenue.
+analytics.sales_by_interval for that bucket against hand-computed
+expected orders/units_sold/revenue.
 
 Test rows (event_id prefixed evt_test_dbt_...) are deleted before AND
 after this runs, so re-running is always safe and it never leaves stale
@@ -24,7 +25,7 @@ Requires the full stack running, plus dbt installed:
     pip install -r dbt/requirements.txt   # once
 
 Usage:
-    python tests/dbt/test_daily_sales.py
+    python tests/dbt/test_sales_by_interval.py
 """
 
 import os
@@ -38,8 +39,10 @@ import psycopg2
 RUN_ID = uuid.uuid4().hex[:8]
 DBT_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "dbt")
 
-# A date no real traffic will ever use - safe to own exclusively.
-TEST_SALE_DATE = "2020-06-15"
+# A 15-minute bucket boundary no real traffic will ever use - safe to
+# own exclusively. Exactly on the boundary so to_timestamp(floor(...))
+# in sales_by_interval.sql maps every test row to this same bucket.
+TEST_INTERVAL_START = "2020-06-15T12:00:00Z"
 
 PG_CONFIG = dict(
     host=os.environ.get("POSTGRES_HOST", "localhost"),
@@ -85,7 +88,7 @@ def insert_test_orders(conn):
                 """,
                 (
                     eid(n),
-                    f"{TEST_SALE_DATE}T12:00:00Z",
+                    TEST_INTERVAL_START,
                     f"user_test_dbt_{RUN_ID}",
                     quantity,
                     unit_price,
@@ -93,7 +96,7 @@ def insert_test_orders(conn):
                 ),
             )
     conn.commit()
-    print(f"Inserted {len(TEST_ORDERS)} test PURCHASE rows on {TEST_SALE_DATE} (run_id={RUN_ID})")
+    print(f"Inserted {len(TEST_ORDERS)} test PURCHASE rows in bucket {TEST_INTERVAL_START} (run_id={RUN_ID})")
 
 
 def run_dbt(*args):
@@ -109,12 +112,12 @@ def run_dbt(*args):
     return result.returncode == 0, result.stdout + result.stderr
 
 
-def query_daily_sales():
+def query_sales_by_interval():
     conn = psycopg2.connect(**PG_CONFIG)
     cur = conn.cursor()
     cur.execute(
-        "SELECT orders, units_sold, revenue FROM analytics.daily_sales WHERE sale_date = %s",
-        (TEST_SALE_DATE,),
+        "SELECT orders, units_sold, revenue FROM analytics.sales_by_interval WHERE interval_start = %s",
+        (TEST_INTERVAL_START,),
     )
     row = cur.fetchone()
     cur.close()
@@ -133,8 +136,8 @@ def main():
         build_ok, output = run_dbt("build")
         expect(build_ok, "`dbt build` (run + test) exited successfully", failures)
 
-        row = query_daily_sales()
-        expect(row is not None, f"a daily_sales row exists for {TEST_SALE_DATE}", failures)
+        row = query_sales_by_interval()
+        expect(row is not None, f"a sales_by_interval row exists for {TEST_INTERVAL_START}", failures)
 
         if row is not None:
             orders, units_sold, revenue = row
@@ -164,11 +167,11 @@ def main():
     finally:
         cleanup(conn)
         conn.close()
-        # Rebuild daily_sales so its table no longer carries a leftover
-        # row for TEST_SALE_DATE now that the source rows are gone -
-        # otherwise the table (unlike a view) would keep that stale row
-        # until the next unrelated `dbt run`.
-        run_dbt("run", "--select", "daily_sales")
+        # Rebuild sales_by_interval so its table no longer carries a
+        # leftover row for TEST_INTERVAL_START now that the source rows
+        # are gone - otherwise the table (unlike a view) would keep that
+        # stale row until the next unrelated `dbt run`.
+        run_dbt("run", "--select", "sales_by_interval")
 
     if failures:
         sys.exit(1)

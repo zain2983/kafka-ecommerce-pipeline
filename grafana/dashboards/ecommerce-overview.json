@@ -2,7 +2,7 @@
   "title": "E-Commerce Streaming Platform",
   "uid": "ecommerce-overview",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "editable": true,
   "refresh": "5s",
   "time": { "from": "now-1h", "to": "now" },
@@ -19,15 +19,15 @@
     {
       "id": 2,
       "type": "stat",
-      "title": "Orders Today",
-      "description": "analytics.daily_sales, today's row (design.md section 18).",
+      "title": "Orders (selected range)",
+      "description": "Count of PURCHASE events within the dashboard's selected time range, computed live from raw.events (not the dbt table, so it's never stale relative to the picker).",
       "gridPos": { "x": 0, "y": 1, "w": 6, "h": 4 },
       "datasource": { "type": "postgres", "uid": "postgres-ds" },
       "targets": [
         {
           "datasource": { "type": "postgres", "uid": "postgres-ds" },
           "format": "table",
-          "rawSql": "SELECT orders FROM analytics.daily_sales WHERE sale_date = CURRENT_DATE",
+          "rawSql": "SELECT count(*) AS orders FROM raw.events WHERE event_type = 'PURCHASE' AND $__timeFilter(event_timestamp)",
           "refId": "A"
         }
       ],
@@ -37,14 +37,14 @@
     {
       "id": 3,
       "type": "stat",
-      "title": "Revenue Today",
+      "title": "Revenue (selected range)",
       "gridPos": { "x": 6, "y": 1, "w": 6, "h": 4 },
       "datasource": { "type": "postgres", "uid": "postgres-ds" },
       "targets": [
         {
           "datasource": { "type": "postgres", "uid": "postgres-ds" },
           "format": "table",
-          "rawSql": "SELECT revenue FROM analytics.daily_sales WHERE sale_date = CURRENT_DATE",
+          "rawSql": "SELECT sum(quantity * unit_price) AS revenue FROM raw.events WHERE event_type = 'PURCHASE' AND $__timeFilter(event_timestamp)",
           "refId": "A"
         }
       ],
@@ -54,14 +54,14 @@
     {
       "id": 4,
       "type": "stat",
-      "title": "Units Sold Today",
+      "title": "Units Sold (selected range)",
       "gridPos": { "x": 12, "y": 1, "w": 6, "h": 4 },
       "datasource": { "type": "postgres", "uid": "postgres-ds" },
       "targets": [
         {
           "datasource": { "type": "postgres", "uid": "postgres-ds" },
           "format": "table",
-          "rawSql": "SELECT units_sold FROM analytics.daily_sales WHERE sale_date = CURRENT_DATE",
+          "rawSql": "SELECT sum(quantity) AS units_sold FROM raw.events WHERE event_type = 'PURCHASE' AND $__timeFilter(event_timestamp)",
           "refId": "A"
         }
       ],
@@ -71,15 +71,15 @@
     {
       "id": 5,
       "type": "stat",
-      "title": "Active Users (last hour)",
-      "description": "Distinct user_id in raw.events over the last hour - not a dbt model, straight from raw since customer_metrics doesn't exist yet.",
+      "title": "Active Users (selected range)",
+      "description": "Distinct user_id in raw.events within the selected time range - not a dbt model, straight from raw since customer_metrics doesn't exist yet.",
       "gridPos": { "x": 18, "y": 1, "w": 6, "h": 4 },
       "datasource": { "type": "postgres", "uid": "postgres-ds" },
       "targets": [
         {
           "datasource": { "type": "postgres", "uid": "postgres-ds" },
           "format": "table",
-          "rawSql": "SELECT count(DISTINCT user_id) AS active_users FROM raw.events WHERE event_timestamp > now() - interval '1 hour'",
+          "rawSql": "SELECT count(DISTINCT user_id) AS active_users FROM raw.events WHERE $__timeFilter(event_timestamp)",
           "refId": "A"
         }
       ],
@@ -89,15 +89,15 @@
     {
       "id": 6,
       "type": "stat",
-      "title": "Conversion Rate (view -> purchase, last hour)",
-      "description": "PURCHASE events / PRODUCT_VIEW events in the last hour, from raw.events directly - product_performance's per-product conversion_rate is deferred.",
+      "title": "Conversion Rate (view -> purchase, selected range)",
+      "description": "PURCHASE events / PRODUCT_VIEW events within the selected time range, from raw.events directly - product_performance's per-product conversion_rate is deferred. This is synthetic demo data with no real purchase funnel, so expect this number to look unrealistically high (event_type_weights in producer/app/config.py treats PURCHASE almost as likely as ADD_TO_CART).",
       "gridPos": { "x": 0, "y": 5, "w": 6, "h": 4 },
       "datasource": { "type": "postgres", "uid": "postgres-ds" },
       "targets": [
         {
           "datasource": { "type": "postgres", "uid": "postgres-ds" },
           "format": "table",
-          "rawSql": "SELECT CASE WHEN count(*) FILTER (WHERE event_type = 'PRODUCT_VIEW') = 0 THEN 0 ELSE round(100.0 * count(*) FILTER (WHERE event_type = 'PURCHASE') / count(*) FILTER (WHERE event_type = 'PRODUCT_VIEW'), 2) END AS conversion_rate FROM raw.events WHERE event_timestamp > now() - interval '1 hour'",
+          "rawSql": "SELECT CASE WHEN count(*) FILTER (WHERE event_type = 'PRODUCT_VIEW') = 0 THEN 0 ELSE round(100.0 * count(*) FILTER (WHERE event_type = 'PURCHASE') / count(*) FILTER (WHERE event_type = 'PRODUCT_VIEW'), 2) END AS conversion_rate FROM raw.events WHERE $__timeFilter(event_timestamp)",
           "refId": "A"
         }
       ],
@@ -107,14 +107,14 @@
     {
       "id": 7,
       "type": "barchart",
-      "title": "Event Type Breakdown (last 24h)",
+      "title": "Event Type Breakdown (selected range)",
       "gridPos": { "x": 6, "y": 5, "w": 9, "h": 8 },
       "datasource": { "type": "postgres", "uid": "postgres-ds" },
       "targets": [
         {
           "datasource": { "type": "postgres", "uid": "postgres-ds" },
           "format": "table",
-          "rawSql": "SELECT event_type, count(*) AS count FROM raw.events WHERE event_timestamp > now() - interval '24 hours' GROUP BY event_type ORDER BY count DESC",
+          "rawSql": "SELECT event_type, count(*) AS count FROM raw.events WHERE $__timeFilter(event_timestamp) GROUP BY event_type ORDER BY count DESC",
           "refId": "A"
         }
       ],
@@ -124,14 +124,15 @@
     {
       "id": 8,
       "type": "timeseries",
-      "title": "Daily Sales Revenue (analytics.daily_sales)",
+      "title": "Sales Revenue by 15-min Interval (analytics.sales_by_interval)",
+      "description": "Refreshed by a cron job running `dbt run` every 15 minutes (scripts/run_dbt.sh) - matches this model's own bucket size, so the trend line is never more than ~15 minutes stale.",
       "gridPos": { "x": 15, "y": 5, "w": 9, "h": 8 },
       "datasource": { "type": "postgres", "uid": "postgres-ds" },
       "targets": [
         {
           "datasource": { "type": "postgres", "uid": "postgres-ds" },
           "format": "time_series",
-          "rawSql": "SELECT sale_date::timestamp AS time, revenue FROM analytics.daily_sales ORDER BY sale_date",
+          "rawSql": "SELECT interval_start AS time, revenue FROM analytics.sales_by_interval WHERE $__timeFilter(interval_start) ORDER BY interval_start",
           "refId": "A"
         }
       ],
@@ -266,7 +267,7 @@
     {
       "id": 17,
       "type": "timeseries",
-      "title": "Memory Used",
+      "title": "Memory Used vs Total",
       "gridPos": { "x": 12, "y": 27, "w": 12, "h": 8 },
       "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
       "targets": [
@@ -287,10 +288,33 @@
     },
     {
       "id": 18,
+      "type": "timeseries",
+      "title": "Disk Used vs Total (/)",
+      "description": "Occupied vs total space on the VM's root filesystem, where Kafka/Postgres/Prometheus data volumes live.",
+      "gridPos": { "x": 0, "y": 35, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+          "expr": "node_filesystem_size_bytes{mountpoint=\"/\"} - node_filesystem_avail_bytes{mountpoint=\"/\"}",
+          "legendFormat": "used",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+          "expr": "node_filesystem_size_bytes{mountpoint=\"/\"}",
+          "legendFormat": "total",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] }
+    },
+    {
+      "id": 19,
       "type": "stat",
       "title": "Load Average (1m)",
       "description": "Above the VM's core count means work is queuing, not just busy.",
-      "gridPos": { "x": 0, "y": 35, "w": 6, "h": 4 },
+      "gridPos": { "x": 12, "y": 35, "w": 4, "h": 4 },
       "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
       "targets": [
         {
@@ -303,47 +327,92 @@
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
     },
     {
-      "id": 19,
-      "type": "stat",
-      "title": "Disk Free (/)",
-      "gridPos": { "x": 6, "y": 35, "w": 6, "h": 4 },
-      "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
-      "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
-          "expr": "node_filesystem_avail_bytes{mountpoint=\"/rootfs\"}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
-    },
-    {
       "id": 20,
       "type": "stat",
-      "title": "Memory Available",
-      "gridPos": { "x": 12, "y": 35, "w": 6, "h": 4 },
-      "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
-      "targets": [
-        {
-          "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
-          "expr": "node_memory_MemAvailable_bytes",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
-    },
-    {
-      "id": 21,
-      "type": "stat",
       "title": "CPU Cores",
-      "gridPos": { "x": 18, "y": 35, "w": 6, "h": 4 },
+      "gridPos": { "x": 16, "y": 35, "w": 4, "h": 4 },
       "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
           "expr": "count(node_cpu_seconds_total{mode=\"idle\"})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 21,
+      "type": "stat",
+      "title": "Disk Free (/)",
+      "gridPos": { "x": 20, "y": 35, "w": 4, "h": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus-ds" },
+          "expr": "node_filesystem_avail_bytes{mountpoint=\"/\"}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 22,
+      "type": "row",
+      "title": "PostgreSQL Storage",
+      "gridPos": { "x": 0, "y": 43, "w": 24, "h": 1 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 23,
+      "type": "stat",
+      "title": "ecommerce Database Size",
+      "description": "Total on-disk size of the whole ecommerce database (all schemas: raw/staging/analytics) - the number to watch for \"how much data is Postgres storing\" specifically, as opposed to the VM's overall disk usage above.",
+      "gridPos": { "x": 0, "y": 44, "w": 8, "h": 4 },
+      "datasource": { "type": "postgres", "uid": "postgres-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "postgres-ds" },
+          "format": "table",
+          "rawSql": "SELECT pg_database_size('ecommerce') AS bytes",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 24,
+      "type": "stat",
+      "title": "raw.events Table Size",
+      "description": "The single fastest-growing table (one row per event, one row every ~0.5s) - includes indexes, via pg_total_relation_size.",
+      "gridPos": { "x": 8, "y": 44, "w": 8, "h": 4 },
+      "datasource": { "type": "postgres", "uid": "postgres-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "postgres-ds" },
+          "format": "table",
+          "rawSql": "SELECT pg_total_relation_size('raw.events') AS bytes",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "id": 25,
+      "type": "stat",
+      "title": "raw.events Row Count",
+      "gridPos": { "x": 16, "y": 44, "w": 8, "h": 4 },
+      "datasource": { "type": "postgres", "uid": "postgres-ds" },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "postgres-ds" },
+          "format": "table",
+          "rawSql": "SELECT count(*) AS rows FROM raw.events",
           "refId": "A"
         }
       ],

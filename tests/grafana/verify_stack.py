@@ -62,11 +62,18 @@ PG_CONFIG = dict(
     password=os.environ.get("POSTGRES_PASSWORD", "ecommerce"),
 )
 
-# Same SQL used by grafana/dashboards/ecommerce-overview.json's Postgres panels.
+# Same SQL used by grafana/dashboards/ecommerce-overview.json's Postgres
+# panels, with Grafana's $__timeFilter(event_timestamp) macro stood in
+# for here as a literal "last hour" - this script runs outside Grafana,
+# so it can't expand the macro itself, but the underlying query shape
+# (and therefore whether it errors) is identical either way.
 DASHBOARD_SQL_QUERIES = [
-    "SELECT orders FROM analytics.daily_sales WHERE sale_date = CURRENT_DATE",
-    "SELECT revenue FROM analytics.daily_sales WHERE sale_date = CURRENT_DATE",
-    "SELECT units_sold FROM analytics.daily_sales WHERE sale_date = CURRENT_DATE",
+    "SELECT count(*) AS orders FROM raw.events WHERE event_type = 'PURCHASE' "
+    "AND event_timestamp > now() - interval '1 hour'",
+    "SELECT sum(quantity * unit_price) AS revenue FROM raw.events WHERE event_type = 'PURCHASE' "
+    "AND event_timestamp > now() - interval '1 hour'",
+    "SELECT sum(quantity) AS units_sold FROM raw.events WHERE event_type = 'PURCHASE' "
+    "AND event_timestamp > now() - interval '1 hour'",
     "SELECT count(DISTINCT user_id) AS active_users FROM raw.events "
     "WHERE event_timestamp > now() - interval '1 hour'",
     "SELECT CASE WHEN count(*) FILTER (WHERE event_type = 'PRODUCT_VIEW') = 0 THEN 0 "
@@ -74,8 +81,12 @@ DASHBOARD_SQL_QUERIES = [
     "/ count(*) FILTER (WHERE event_type = 'PRODUCT_VIEW'), 2) END AS conversion_rate "
     "FROM raw.events WHERE event_timestamp > now() - interval '1 hour'",
     "SELECT event_type, count(*) AS count FROM raw.events "
-    "WHERE event_timestamp > now() - interval '24 hours' GROUP BY event_type ORDER BY count DESC",
-    "SELECT sale_date::timestamp AS time, revenue FROM analytics.daily_sales ORDER BY sale_date",
+    "WHERE event_timestamp > now() - interval '1 hour' GROUP BY event_type ORDER BY count DESC",
+    "SELECT interval_start AS time, revenue FROM analytics.sales_by_interval "
+    "WHERE interval_start > now() - interval '1 hour' ORDER BY interval_start",
+    "SELECT pg_database_size('ecommerce') AS bytes",
+    "SELECT pg_total_relation_size('raw.events') AS bytes",
+    "SELECT count(*) AS rows FROM raw.events",
 ]
 
 EXPECTED_DATASOURCES = {

@@ -106,6 +106,14 @@ Don't run both at once against the test suite - see the note in
 [`tests/README.md`](tests/README.md#18-dockerized-produceringestionretry-phase-13)
 about shared consumer-group IDs.
 
+## Deploying to a VM
+
+See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for a from-scratch guide
+to deploying this stack on a remote VM (SSH hardening, firewall, image
+pulling vs. local builds, env config, dbt scheduling, verification).
+`docs/VM_ACCESS.md` (gitignored, not in this repo's history) holds
+live connection details for any VM this has actually been deployed to.
+
 ## Repository structure
 
 ```text

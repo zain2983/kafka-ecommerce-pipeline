@@ -16,7 +16,7 @@
 #      startup-race fixes for why this distinction matters).
 #   4. Creates the Kafka topics (idempotent - safe even if they
 #      already exist).
-#   5. Runs an initial `dbt run` so analytics.daily_sales exists as a
+#   5. Runs an initial `dbt run` so analytics.sales_by_interval exists as a
 #      table before anything queries it (Grafana's dashboard included).
 #   6. Runs tests/grafana/verify_stack.py - a container reporting
 #      "healthy" or "Up" doesn't mean the whole system actually works

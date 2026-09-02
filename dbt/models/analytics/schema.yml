@@ -1,10 +1,10 @@
 version: 2
 
 models:
-  - name: daily_sales
-    description: One row per calendar day with PURCHASE activity (design.md section 18).
+  - name: sales_by_interval
+    description: One row per 15-minute bucket with PURCHASE activity (design.md section 18).
     columns:
-      - name: sale_date
+      - name: interval_start
         tests:
           - unique
           - not_null
