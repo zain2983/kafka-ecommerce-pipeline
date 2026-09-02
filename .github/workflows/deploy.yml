@@ -1,0 +1,30 @@
+name: Deploy to VM
+
+# Manual for now, on purpose - triggered from the Actions tab
+# ("Run workflow") rather than automatically after CI, so each deploy
+# is a deliberate choice while this flow is still new. Once it's
+# trusted, this can be changed to a `workflow_run` trigger gated on
+# ci.yml succeeding on main.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trust the VM's host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      # The key used here is restricted server-side (see
+      # scripts/deploy_remote.sh's header) to running exactly one
+      # script - it cannot open an arbitrary shell on the VM even if
+      # this secret leaked.
+      - name: Run deploy_remote.sh on the VM
+        run: |
+          umask 077
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > deploy_key
+          chmod 600 deploy_key
+          ssh -i deploy_key "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}"
+          rm -f deploy_key

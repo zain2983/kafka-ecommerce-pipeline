@@ -111,10 +111,23 @@ Step 6), so ufw is a second layer of defense, not the only one.
 
 ## Step 5 — Get the code onto the VM
 
-Two options:
+**Option B — git clone directly on the VM (current setup; needed for
+CI-driven deploys)**. This repo is public, so no deploy key/PAT is
+needed to pull:
 
-**Option A — rsync from your local working copy** (used for this
-project; simplest if the VM doesn't have its own GitHub deploy key set up):
+```bash
+git clone https://github.com/zain2983/kafka-ecommerce-pipeline.git /home/deploy/DE-Demo-Project
+```
+
+Ongoing deploys are then just `git fetch && git reset --hard
+origin/main` in that directory, followed by `docker compose up -d
+--build` — see `scripts/deploy_remote.sh` and "CI-driven deploys"
+below, which run exactly that, triggered from GitHub Actions.
+
+**Option A — rsync from your local working copy** (how this project
+was *first* deployed, before switching to Option B — kept here since
+it's still the simplest path if you'd rather not give the VM any tie
+to GitHub, e.g. for a private repo with no deploy key set up):
 
 ```bash
 rsync -avz -e "ssh -i <your_private_key>" \
@@ -129,15 +142,8 @@ directory (rather than a whole directory tree), rsync flattens their
 paths — `rsync a/b/file.yml some_dir/` does NOT recreate `a/b/`, it
 drops `file.yml` directly in `some_dir/`. Always sync whole directories,
 or use `--relative`, or do one file at a time with its full destination
-path spelled out.
-
-**Option B — git clone directly on the VM** (needs the VM to have
-either a deploy key for this repo, or the repo to be public / cloned
-over HTTPS with a PAT):
-
-```bash
-git clone <repo-url> /home/deploy/DE-Demo-Project
-```
+path spelled out. An rsync'd directory has no `.git`, so it can't be
+`git fetch`/`reset` — don't mix the two options on the same directory.
 
 ## Step 6 — Configure environment for this VM
 
@@ -251,6 +257,46 @@ it executes both directly and through Grafana's proxy. Should end with
 
 Then visit `http://<VM_IP>:3000`, log in with the Grafana credentials
 from `.env`, and confirm the dashboard is showing live data.
+
+## CI-driven deploys (`.github/workflows/deploy.yml`)
+
+Once the VM is on Option B (a real `git clone`), pushing a change to
+`main` doesn't reach the VM by itself — deploys are a separate,
+explicit step from `.github/workflows/deploy.yml`, run manually from
+the Actions tab ("Run workflow" on `Deploy to VM`, currently
+`workflow_dispatch`-only on purpose, see the workflow's own comment for
+why). It SSHes into the VM with a **dedicated, restricted** key and
+runs `scripts/deploy_remote.sh` there, which does exactly what Step 7
+above does by hand: `git fetch && git reset --hard origin/main`,
+`docker compose up -d --build`, wait for kafka/postgres healthchecks,
+re-create Kafka topics.
+
+### One-time setup for this (already done for the current VM)
+
+1. Generate a dedicated keypair — don't reuse a personal key:
+   ```bash
+   ssh-keygen -t ed25519 -f gha_deploy_key -N "" -C "github-actions-deploy@<repo>"
+   ```
+2. Install the **public** half on the VM, restricted so this key can
+   run nothing but the deploy script, regardless of what command a
+   client sends — this is what caps the damage if the private half
+   (held only as a GitHub Actions secret) ever leaks:
+   ```
+   command="/home/deploy/DE-Demo-Project/scripts/deploy_remote.sh",no-port-forwarding,no-X11-forwarding,no-agent-forwarding ssh-ed25519 AAAA... github-actions-deploy@<repo>
+   ```
+   appended as its own line in `~deploy/.ssh/authorized_keys`.
+3. Store the **private** half and connection details as repo secrets
+   (Settings → Secrets and variables → Actions), then delete any local
+   copy of the private key:
+   - `DEPLOY_SSH_KEY` — the private key file's full contents
+   - `DEPLOY_HOST` — the VM's IP
+   - `DEPLOY_USER` — `deploy`
+
+From then on, "deploy" is: push to `main` (or merge a PR — CI runs
+either way), then manually trigger the `Deploy to VM` workflow once
+you're satisfied. The VM directory is a deploy target now, not
+somewhere to hand-edit — `deploy_remote.sh`'s `git reset --hard` will
+discard any local changes made directly on the box.
 
 ## Bugs already fixed in this repo (informational — you won't hit these deploying from current `main`)
 
