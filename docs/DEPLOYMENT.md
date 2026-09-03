@@ -125,6 +125,20 @@ origin/main` in that directory, followed by `docker compose up -d
 --build` — see `scripts/deploy_remote.sh` and "CI-driven deploys"
 below, which run exactly that, triggered from GitHub Actions.
 
+**A fresh `git clone` does NOT recreate anything gitignored** — `.env`,
+`.venv/`, `logs/`, `backups/postgres/` are all deliberately untracked
+(secrets and generated output don't belong in git), so a plain `git
+clone` leaves the directory without any of them. Step 6 (`.env`) and
+Step 8 (`.venv`) below cover creating these the first time; if you ever
+swap an existing deploy directory for a fresh clone later (as this
+project's own VM did, switching from an rsync-based directory to a git
+one), redo those steps by hand too — this bit a real deploy once: the
+dbt refresh cron silently stopped working for ~16 hours because its
+`.venv/` and `logs/` (the latter needed just for `>> logs/dbt_cron.log`
+to have somewhere to write) didn't exist in the new directory, and a
+missing-directory redirect failure produces no log output to notice it
+by. See `docs/VM_ACCESS.md`'s History section for the full story.
+
 **Option A — rsync from your local working copy** (how this project
 was *first* deployed, before switching to Option B — kept here since
 it's still the simplest path if you'd rather not give the VM any tie
