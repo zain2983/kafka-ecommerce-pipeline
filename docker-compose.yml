@@ -227,6 +227,10 @@ services:
 
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      # Defaults to the code's own default (2.0/sec, see
+      # producer/app/config.py) unless overridden in .env - e.g. for a
+      # deliberate load test.
+      EVENTS_PER_SECOND: ${EVENTS_PER_SECOND:-2.0}
 
     depends_on:
       kafka:
